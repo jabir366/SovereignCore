@@ -1,0 +1,20 @@
+[Unit]
+Description=MongoDB pod-IP loopback alias (KubeVirt masquerade isSelf fix)
+Documentation=https://github.com/IBM/sovereigncore
+# No-op until mongo-first-boot.sh has recorded this member's host:port.
+ConditionPathExists=/etc/mongo-rs-self
+After=network-online.target
+Wants=network-online.target
+# Must be in place before mongod tries to locate itself in the RS config.
+Before=mongod.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/mongo-pod-alias.sh
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

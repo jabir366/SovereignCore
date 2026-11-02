@@ -1,0 +1,6 @@
+# Source of this directory. Update whenever contents are refreshed from the securedimage repo.
+repo=git@github.ibm.com:zDataAndAI/securedimage.git
+branch=bootc-approach
+commit=f3717def13cafc0150ea76c18904dad38a0b2e83
+commit_subject=Remove stale files not needed for the bootc image build
+synced_at=2026-11-02T19:05:11Z

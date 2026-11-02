@@ -1,0 +1,24 @@
+[Unit]
+Description=Daily AIDE File Integrity Check Timer (mdb-gov-02 / iscf-sc-04)
+Documentation=man:aide(1)
+# NOTE: no Requires=aide-check.service here. Requires= pulled the (long-running)
+# service into the boot transaction as soon as the timer was started, so AIDE
+# ran at every boot regardless of OnCalendar. The timer activates the service
+# itself via Unit= below.
+
+[Timer]
+# Run daily at 02:00 local time
+OnCalendar=*-*-* 02:00:00
+# Do NOT run on boot — the AIDE database is pre-built in the bootc image so
+# --init is never needed at boot time. Running --check at boot delays RS rejoin
+# by 6-10 min (full filesystem scan on s390x), blocking MongoDB failover recovery.
+# AIDE integrity checks are scheduled daily only (02:00) via OnCalendar above.
+# Persistent=true is intentionally NOT set: a VM that was down/restarting at
+# 02:00 would otherwise run a full AIDE scan immediately at boot and delay
+# replica-set rejoin after failover.
+# Randomise within a 5-minute window to avoid thundering-herd on large clusters
+RandomizedDelaySec=5min
+Unit=aide-check.service
+
+[Install]
+WantedBy=timers.target

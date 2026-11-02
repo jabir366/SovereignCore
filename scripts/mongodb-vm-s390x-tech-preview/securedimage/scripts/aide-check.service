@@ -1,0 +1,44 @@
+[Unit]
+Description=AIDE File Integrity Check (mdb-gov-02 / iscf-sc-04)
+Documentation=man:aide(1)
+# Fix 7: Must NOT start until cloud-init has fully completed.
+# AIDE --check running concurrently with cloud-init runcmd causes a PID
+# hierarchy where aide becomes a child of the cloud-init runcmd shell,
+# blocking all subsequent runcmd commands (mongo-first-boot.sh, probe enable).
+# After=cloud-final.service ensures AIDE never fires during first-boot.
+After=cloud-final.service auditd.service
+Wants=auditd.service
+# DefaultDependencies=no prevents systemd from pulling this into the
+# sysinit/shutdown ordering graph, which could still cause early execution.
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+# On first boot the AIDE database does not yet exist — run --init to build it
+# instead of --check (which would either fail or scan uselessly with no baseline).
+# On subsequent boots, --check verifies integrity against the established baseline.
+# The sentinel /var/lib/aide/aide.db.gz is created by --init and signals readiness.
+ExecStart=/bin/bash -c '\
+  if [ ! -f /var/lib/aide/aide.db.gz ]; then \
+    echo "AIDE: no database found — running --init to build baseline (first boot)"; \
+    /usr/sbin/aide --init && \
+    mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz && \
+    echo "AIDE: baseline database built successfully"; \
+  else \
+    echo "AIDE: running --check against existing baseline"; \
+    /usr/sbin/aide --check; \
+  fi'
+# Output to journal only — never to the serial console.
+# Console flooding with AIDE fstatfs warnings blocks interactive debugging.
+# Use: journalctl -u aide-check to inspect AIDE output.
+StandardOutput=journal
+StandardError=journal
+# If AIDE exits 0  → clean run, no changes.
+# If AIDE exits 1+ → integrity violation; systemd marks unit as failed,
+#                    triggering a journal alert that can be scraped by
+#                    Compliance Operator / Concert.
+SuccessExitStatus=0 1
+
+# No [Install] section on purpose: WantedBy=aide-check.timer made `systemctl
+# enable` link the service under the timer, so AIDE started at every boot.
+# The service is started only by aide-check.timer (Unit=aide-check.service).

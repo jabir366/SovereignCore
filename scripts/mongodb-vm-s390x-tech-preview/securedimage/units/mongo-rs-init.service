@@ -1,0 +1,22 @@
+[Unit]
+Description=MongoDB replica-set initiation (member-0 only, retries until done)
+Documentation=https://github.com/IBM/sovereigncore
+# /etc/mongo-rs-init.env is written by cloud-init on member-0 only and removed by
+# mongo-rs-init.sh once the replica set is initiated and a PRIMARY exists. If the
+# VM reboots before that, this unit runs again at boot and picks up where it
+# left off; once done the condition keeps it a no-op forever.
+ConditionPathExists=/etc/mongo-rs-init.env
+After=network-online.target mongod.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mongo-rs-init.sh
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

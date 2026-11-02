@@ -1,0 +1,45 @@
+[Unit]
+Description=MongoDB Enterprise Advanced — first-boot initialisation
+Documentation=https://github.com/IBM/sovereigncore
+#
+# Ordering: this unit is triggered by cloud-init runcmd via `systemctl start`
+# AFTER cloud-init has written /etc/mongo-init-env. Do NOT list cloud-init.service
+# in After= — that would create a circular dependency because cloud-init runcmd
+# is still running when it calls systemctl start on this unit.
+# network-online.target is safe to list (it is already reached before runcmd runs).
+After=network-online.target
+Wants=network-online.target
+#
+# Require the MongoDB data and log mount points to be available before
+# starting — guards against cases where the DataVolume is not yet bound.
+RequiresMountsFor=/var/lib/mongo /var/log/mongodb
+
+[Service]
+Type=oneshot
+# RemainAfterExit=yes: systemctl reports the unit as 'active' even after
+# ExecStart exits, so dependent services can use 'After=' reliably.
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/mongo-first-boot.sh
+# Log to both journal and console so operators can watch via virsh console
+# or `oc logs` during early boot debugging.
+StandardOutput=journal+console
+StandardError=journal+console
+# 600 s = 10 min: covers mongod start + user creation + keyFile generation
+# + optional RS member wait (up to 5 min) + compliance config writes.
+# Increase if builds are slow or the cluster has high latency.
+TimeoutStartSec=600
+
+[Install]
+# WantedBy is declared so the unit CAN be enabled if an operator explicitly
+# runs: systemctl enable mongodb-first-boot.service
+#
+# By default this unit is DISABLED (see Containerfile Section 6).
+# cloud-init runcmd triggers it manually via:
+#   systemctl start mongodb-first-boot.service
+# This gives cloud-init full control over the exact moment the unit fires —
+# specifically, only AFTER /etc/mongo-init-env has been written with the
+# credentials injected by the Helm chart _helpers.tpl.
+#
+# If this unit were enabled at boot, it would race against cloud-init and
+# likely fail because /etc/mongo-init-env would not yet exist.
+WantedBy=multi-user.target
