@@ -1,6 +1,5 @@
 [Unit]
 Description=MongoDB primary readiness probe HTTP server
-Documentation=https://github.com/IBM/sovereigncore
 # Start after mongod is up. cloud-final.service is intentionally NOT listed
 # here — on first boot the probe is started by mongo-first-boot.sh (inside
 # runcmd) before cloud-final completes, and listing it would cause systemctl

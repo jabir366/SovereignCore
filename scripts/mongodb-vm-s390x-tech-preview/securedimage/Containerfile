@@ -1,97 +1,64 @@
 # =============================================================================
-# Containerfile — bootc-based MongoDB Enterprise Advanced 8.x on RHEL 9 s390x
+# Containerfile — bootc-based MongoDB Enterprise Advanced 8.x on RHEL 9 (s390x)
 # =============================================================================
 #
-# Target: OCP Virt VirtualMachine on IBM Z (s390x)
-# Base:   registry.redhat.io/rhel9/rhel-bootc:9.6   (s390x variant auto-selected)
-# Build:  podman build --platform linux/s390x --build-arg IMAGE_TAG=<ver> -t mongodb-ea-bootc:<ver> .
-#         IMAGE_TAG is ALWAYS supplied by build.sh / Makefile — never rely on the ARG default.
-#         build.sh auto-increments the patch version in VERSION on every build invocation.
-# Output: qcow2 produced by bootc-image-builder (see build.sh)
-#
-# Version
-# ───────
-# The canonical version lives in the VERSION file (one line: MAJOR.MINOR.PATCH).
-# build.sh auto-increments the patch field before every `podman build` call and
-# writes the new version back to VERSION.  The incremented value is then passed
-# here via --build-arg IMAGE_TAG=<new-ver>.  The Containerfile ARG default below
-# is intentionally set to "0.0.0" so a build run WITHOUT the --build-arg flag
-# is immediately visible in Quay label inspection (never silently inherits a
-# stale version from a previous build).
-#
-# Quay / Clair scanning
-# ─────────────────────
-# This image is the scannable OCI artifact.  Push it with:
-#   make push-oci REGISTRY=quay.io/<org>
-# or:
-#   PUSH_OCI=true REGISTRY=quay.io/<org> ./build.sh
-#
-# Clair requirements met by this Containerfile:
-#   • Base image from registry.redhat.io — Clair recognises RHEL RPM inventory.
-#   • /etc/os-release is restored to canonical RHEL 9 values after oscap
-#     --remediate (STIG remediation can overwrite OS identity fields; Clair's
-#     distribution detector reads /etc/os-release to select the CVE database).
-#   • rpm --rebuilddb is called after all package and hardening layers so the
-#     RPM database is in a clean, queryable state for Clair's package indexer.
-#   • org.opencontainers.image.version receives the concrete, caller-supplied
-#     IMAGE_TAG — never an unexpanded shell variable or "${}"-style token.
-#   • quay.expires-after is NOT set: images are retained indefinitely.
-#     Add "LABEL quay.expires-after=Xw" if tag expiry is desired.
+# Target: KVM / KubeVirt virtual machine on s390x
+# Base:   RHEL 9 bootc image (see BASE_IMAGE below; s390x variant auto-selected)
+# Build:  podman build --platform linux/s390x --build-arg IMAGE_TAG=<ver> \
+#             -t mongodb-bootc:<ver> .
+#         Normally invoked through build-image.sh / the Makefile.
+# Output: qcow2 produced by bootc-image-builder (see build-image.sh)
 #
 # Design principles
 # ─────────────────
 # • No credentials, passwords, or secrets are baked in.
 #   All runtime secrets are injected by cloud-init at first boot
-#   via /etc/mongo-init-env (written by Helm _helpers.tpl).
-# • mongo-first-boot.sh and mongo-rs-init.sh are identical to the scripts
-#   in services/mongodb-vm/v1/image-scripts/ — no logic duplication.
+#   via /etc/mongo-init-env.
 # • The image is fully self-contained: cloud-init, mongod, pymongo, openssl,
 #   and the first-boot systemd unit are baked in.
 # • mongosh is intentionally NOT installed — it is not available for s390x.
-#   All MongoDB interactions use python3 + pymongo (matches existing scripts).
+#   All MongoDB interactions use python3 + pymongo.
 # • SELinux is enforcing; bootc handles relabelling at first boot automatically.
 # • Non-root mongod user is created; mongod never runs as root.
+# • Image scanners (e.g. Clair) need a valid /etc/os-release, a clean RPM
+#   database and a concrete org.opencontainers.image.version label; the
+#   corresponding sections below take care of that.
 # =============================================================================
 
-FROM registry.redhat.io/rhel9/rhel-bootc:9.6
+# ---------------------------------------------------------------------------
+# Build arguments
+# ---------------------------------------------------------------------------
+# BASE_IMAGE: bootc base image. The default requires `podman login registry.redhat.io`.
+ARG BASE_IMAGE=registry.redhat.io/rhel9/rhel-bootc:9.6
 
-# ---------------------------------------------------------------------------
-# ARGs — supplied at build time by build.sh / Makefile
-# ---------------------------------------------------------------------------
-# IMAGE_TAG: the concrete version string for this build (e.g. 8.3.12).
-#   • build.sh reads VERSION, auto-increments the patch digit, writes the new
-#     value back to VERSION, then passes it here via --build-arg IMAGE_TAG=<ver>.
-#   • The default "0.0.0" is a deliberate sentinel: if a build is triggered
-#     without supplying IMAGE_TAG the resulting image label will contain "0.0.0",
-#     making the missing argument immediately obvious in Quay or `podman inspect`.
-#   • NEVER hardcode a real version here — all version state lives in VERSION.
-#
-# MONGODB_VERSION and MONGODB_PACKAGE are kept for future flexibility but are
-# not currently interpolated into the repo URL — the URL is written literally
-# in SECTION 1 so it is always visible and auditable.
+FROM ${BASE_IMAGE}
+
+# IMAGE_TAG: concrete version string for this build (e.g. 1.0.0). Supplied by
+#   build-image.sh. The default "0.0.0" is a deliberate sentinel: a build run
+#   without --build-arg IMAGE_TAG is immediately visible in `podman inspect`.
+# MONGODB_VERSION: MongoDB major.minor release line (repository path).
+# MONGODB_REPO_BASEURL / MONGODB_GPG_KEY_URL: optional overrides, e.g. to point
+#   at an internal mirror in a disconnected environment. When empty, the public
+#   MongoDB repository for MONGODB_VERSION is used.
 ARG IMAGE_TAG=0.0.0
 ARG MONGODB_VERSION=8.0
-ARG MONGODB_PACKAGE=mongodb-enterprise
+ARG MONGODB_REPO_BASEURL=
+ARG MONGODB_GPG_KEY_URL=
 
 # ---------------------------------------------------------------------------
 # SECTION 1 — MongoDB Enterprise repository
 # ---------------------------------------------------------------------------
-# The official MongoDB EA repo for RHEL 9 / s390x.
+# The official MongoDB Enterprise repo for RHEL 9 / s390x.
 # See: https://www.mongodb.com/docs/manual/tutorial/install-mongodb-enterprise-on-red-hat/
-# Replace the baseurl with your internal mirror if running in a disconnected env.
-RUN cat > /etc/yum.repos.d/mongodb-enterprise.repo <<'REPOEOF'
-[mongodb-enterprise]
-name=MongoDB Enterprise Repository
-baseurl=https://repo.mongodb.com/yum/redhat/9/mongodb-enterprise/8.0/s390x/
-gpgcheck=1
-enabled=1
-gpgkey=https://pgp.mongodb.com/server-8.0.asc
-REPOEOF
+RUN baseurl="${MONGODB_REPO_BASEURL:-https://repo.mongodb.com/yum/redhat/9/mongodb-enterprise/${MONGODB_VERSION}/s390x/}" && \
+    gpgkey="${MONGODB_GPG_KEY_URL:-https://pgp.mongodb.com/server-${MONGODB_VERSION}.asc}" && \
+    printf '[mongodb-enterprise]\nname=MongoDB Enterprise Repository\nbaseurl=%s\ngpgcheck=1\nenabled=1\ngpgkey=%s\n' \
+        "${baseurl}" "${gpgkey}" > /etc/yum.repos.d/mongodb-enterprise.repo
 
 # ---------------------------------------------------------------------------
 # SECTION 2 — Install packages
 # ---------------------------------------------------------------------------
-# MongoDB EA is installed as individual components — NOT the meta-package.
+# MongoDB Enterprise is installed as individual components — NOT the meta-package.
 # 'mongodb-enterprise' is a meta-package that hard-depends on 'mongodb-mongosh',
 # which has NO s390x build in the MongoDB 8.0 repo (x86_64 only).
 # Installing the meta-package fails with:
@@ -156,7 +123,7 @@ RUN systemctl enable qemu-guest-agent.service 2>/dev/null || true
 # Python 3.12 (RHEL 9 AppStream) unlocks the full CVE-free versions for all
 # transitive dependencies that were blocked on 3.9 compat.
 #
-# Sources: Quay Clair scan 320360_827158058 against mongodb-ea-bootc:8.3.2.17-s390x
+# Pinned to releases that resolve known advisories reported by image scanners:
 #   urllib3    1.26.5 → 2.8.0   (requires py>=3.10; all GHSA-*/PYSEC-* resolved)
 #   setuptools 53.0.0 → 84.0.0  (requires py>=3.10; all GHSA-*/PYSEC-* resolved)
 #   requests   2.25.1 → 2.34.2  (requires py>=3.10; all GHSA-*/PYSEC-* resolved)
@@ -177,7 +144,7 @@ RUN pip3.12 install --no-cache-dir \
 # ---------------------------------------------------------------------------
 # SECTION 4 — mongod user / directory ownership
 # ---------------------------------------------------------------------------
-# MongoDB EA RPM creates the mongod user, but we ensure correct ownership
+# MongoDB Enterprise RPM creates the mongod user, but we ensure correct ownership
 # of runtime directories explicitly so bootc image conversion doesn't lose them.
 RUN mkdir -p \
         /var/lib/mongo \
@@ -193,9 +160,6 @@ RUN mkdir -p \
 # ---------------------------------------------------------------------------
 # SECTION 5 — Bake in first-boot scripts
 # ---------------------------------------------------------------------------
-# These scripts are the single source of truth from:
-#   services/mongodb-vm/v1/image-scripts/
-# They are identical — no divergence allowed.
 COPY scripts/mongo-first-boot.sh  /usr/local/bin/mongo-first-boot.sh
 COPY scripts/mongo-rs-init.sh       /usr/local/bin/mongo-rs-init.sh
 # Bake the readiness probe so cloud-init never writes to /usr/local/bin at
@@ -249,17 +213,17 @@ RUN systemctl disable mongod.service 2>/dev/null || true
 # SECTION 7 — cloud-init configuration hardening
 # ---------------------------------------------------------------------------
 # Disable cloud-init datasource polling for sources we don't use.
-# On OCP Virt, the only datasource is NoCloud (cloud-init userdata from
+# On KubeVirt, the only datasource is NoCloud (cloud-init userdata from
 # the VirtualMachine spec). This speeds up boot and avoids timeout waits.
 RUN cat > /etc/cloud/cloud.cfg.d/99-datasource.cfg <<'CFGEOF'
 datasource_list: [ NoCloud, None ]
 CFGEOF
 
 # ---------------------------------------------------------------------------
-# SECTION 8 — Security hardening (ISCF IBM Sovereign Core Framework)
+# SECTION 8 — Security hardening
 # ---------------------------------------------------------------------------
 
-# mdb-virt-01 / iscf-ia-04 — disable root SSH login
+# Disable root SSH login and password authentication
 RUN sed -i \
         -e 's/^#\?PermitRootLogin.*/PermitRootLogin no/' \
         -e 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' \
@@ -271,9 +235,7 @@ RUN systemctl enable sshd.service
 # Remove any default/empty passwords — defence in depth
 RUN passwd -l root 2>/dev/null || true
 
-# mdb-virt-04 / iscf-ai-03 — SELinux enforcing (bootc default; assert it is not disabled)
-# Note: mdb-enc-05 is storage-class encryption (OCS) — that is a chart-level control.
-# SELinux enforcing maps to mdb-virt-04 (guest OS hardening) and iscf-ai-03.
+# SELinux enforcing (bootc default; assert it is not disabled)
 RUN sed -i 's/^SELINUX=.*/SELINUX=enforcing/' /etc/selinux/config 2>/dev/null || true
 
 # Restrict /var/lib/mongo and /var/log/mongodb via SELinux type enforcement
@@ -344,7 +306,7 @@ RUN systemctl enable selinux-ostree-relabel.service
 # ---------------------------------------------------------------------------
 # SECTION 8b — DISA STIG for RHEL 9 hardening via OpenSCAP + FIPS 140-3
 # ---------------------------------------------------------------------------
-# mdb-virt-04 / iscf-ai-03 — STIG-hardened guest OS (FedRAMP-aligned)
+# STIG-hardened guest OS (FedRAMP-aligned)
 #
 # Profile: xccdf_org.ssgproject.content_profile_stig
 #   This is the DISA Security Technical Implementation Guide (STIG) for
@@ -396,8 +358,8 @@ RUN oscap xccdf eval \
 # ---------------------------------------------------------------------------
 # SECTION 8b-post — Restore canonical /etc/os-release after oscap remediation
 # ---------------------------------------------------------------------------
-# WHY THIS IS REQUIRED FOR QUAY CLAIR SCANNING:
-#   Quay Clair's ClairCore distribution detector reads /etc/os-release from
+# WHY THIS IS REQUIRED FOR IMAGE SCANNING:
+#   Image scanners such as Clair (ClairCore) read /etc/os-release from
 #   every image layer to identify the OS family and select the matching CVE
 #   database (RHEL 9 → Red Hat Security Data API).  Some DISA STIG RHEL 9
 #   rules (specifically those in the banner / identity rule group) cause
@@ -406,9 +368,9 @@ RUN oscap xccdf eval \
 #   VERSION_ID.  If /etc/os-release no longer contains ID=rhel and
 #   VERSION_ID="9" after the oscap run, ClairCore classifies the image as
 #   "unknown distribution" and skips all CVE matching — the scan completes
-#   with zero vulnerability results and Quay shows no security report.
+#   with zero vulnerability results and no security report is produced.
 #
-# This RUN layer enforces the four fields Clair reads, unconditionally,
+# This RUN layer enforces the fields scanners read, unconditionally,
 # after oscap.  It does not remove any STIG-applied changes to other files.
 # The sed commands are idempotent: they only act if a line is wrong or absent.
 RUN \
@@ -424,13 +386,13 @@ RUN \
     else \
         echo 'VERSION_ID="9"' >> /etc/os-release; \
     fi && \
-    # Ensure ID_LIKE=fedora is present (used by some Clair backends as fallback)
+    # Ensure ID_LIKE=fedora is present (used by some scanners as fallback)
     grep -q '^ID_LIKE=' /etc/os-release 2>/dev/null || echo 'ID_LIKE="fedora"' >> /etc/os-release && \
-    # Ensure /etc/redhat-release is intact (secondary Clair detection path)
+    # Ensure /etc/redhat-release is intact (secondary detection path)
     if [ ! -f /etc/redhat-release ] || ! grep -qi 'red hat enterprise linux' /etc/redhat-release 2>/dev/null; then \
         echo 'Red Hat Enterprise Linux release 9' > /etc/redhat-release; \
     fi && \
-    echo "[Clair-fix] /etc/os-release and /etc/redhat-release verified."
+    echo "[scanner-fix] /etc/os-release and /etc/redhat-release verified."
 
 # ---------------------------------------------------------------------------
 # SECTION 8c — FIPS 140-3 mode (mandatory for FedRAMP)
@@ -458,10 +420,10 @@ RUN fips-mode-setup --enable 2>/dev/null || true
 RUN update-crypto-policies --set FIPS 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# SECTION 8d — Post-STIG hardening pass (live-scan remediation)
+# SECTION 8d — STIG fixes beyond oscap --remediation
 # ---------------------------------------------------------------------------
-# These fixes address the 12 Containerfile-fixable rules identified during
-# the live VM STIG scan.
+# These fixes address STIG rules that oscap --remediate cannot remediate
+# during an image build.
 # They are applied AFTER the oscap --remediate run above so they do not
 # conflict with oscap's own file writes.
 
@@ -532,7 +494,7 @@ AUDITDCONF
 # only activates them if augenrules --load is called on a live system.
 # ExecStartPost runs augenrules --load only — no auditctl -e 2 here.
 #
-# WHY no auditctl -e 2 in ExecStartPost (Scan 5 root cause fix):
+# WHY no auditctl -e 2 in ExecStartPost:
 #   When auditctl -e 2 is set at boot, the kernel locks the audit subsystem.
 #   oscap's audit_rules_* checks call auditctl -l to verify loaded rules; the
 #   kernel rejects AUDIT_LIST_RULES netlink requests from non-auditd_t processes
@@ -555,7 +517,7 @@ RUN mkdir -p /etc/systemd/system/auditd.service.d && \
     printf '[Service]\nExecStartPost=-+/sbin/augenrules --load\n' \
     > /etc/systemd/system/auditd.service.d/10-load-rules.conf
 
-# mdb-aud-04: the MongoDB audit log is append-only (chattr +a, set by
+# The MongoDB audit log is append-only (chattr +a, set by
 # mongo-first-boot.sh). At EVERY start mongod rotates it by renaming the existing
 # file, and rename() on an append-only file fails (EPERM) — mongod then exits 102
 # before it ever listens. So clear the flag before mongod starts and set it again
@@ -604,10 +566,9 @@ RUN chmod 0640 /etc/audit/auditd.conf 2>/dev/null || true \
     && find /etc/audit/ -name "*.conf" -exec chmod 0640 {} \; 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# SECTION 8e — Post-Scan-2 hardening pass (Scan 3 target: ≤18 fails)
+# SECTION 8e — Further STIG hardening fixes
 # ---------------------------------------------------------------------------
-# Fixes for the 92 remaining failures identified in live VM Scan 2
-# (2026-09-16).
+# Fixes for STIG rules that remain after the oscap --remediate pass.
 # Applied after §8d so there are no conflicts with earlier writes.
 #
 # Fix groups:
@@ -680,7 +641,7 @@ RUN sed -i \
 # causes sshd to refuse to load RSA host keys and fail to start on first boot.
 # This is an operational safety exception: we keep FIPS (which already enforces
 # FIPS 140-3 algorithm restrictions) and accept the single rule failure.
-# configure_crypto_policy is recorded as an accepted finding in the worklog.
+# configure_crypto_policy is recorded as an accepted finding.
 RUN update-crypto-policies --set FIPS 2>/dev/null || true
 
 # ── §8e-F: SSH host key permissions ──────────────────────────────────────────
@@ -716,7 +677,7 @@ RUN for f in /root/.bashrc /root/.bash_profile /root/.bash_logout /root/.profile
 # they cannot read /etc/audit/rules.d/ (auditd_conf_t:0700) or call auditctl -l
 # via netlink.  oscap runs as the sudo'd user; if that user maps to staff_u,
 # all 74 audit_rules_* checks return "Permission denied" and fail.
-# Decision (image 8.3.8): keep __default__ → unconfined_u so oscap can verify
+# Decision: keep __default__ → unconfined_u so oscap can verify
 # audit rules.  selinux_context_elevation_for_sudo is an accepted finding (1 rule).
 # Only apply the staff_u role expansion, not the login mapping.
 RUN semanage user -m -R "staff_r sysadm_r" staff_u 2>/dev/null || true
@@ -832,10 +793,11 @@ RUN sed -i 's|^root:.*|root: root@localhost|' /etc/aliases 2>/dev/null || true ;
 #
 # Placed AFTER all STIG/FIPS/hardening sections so remediation cannot undo it.
 # firewall-offline-cmd edits on-disk config — no daemon needed at build time.
-# No || true: silent failure here reproduces the "VM never Ready" bug, so the
-# build must fail loudly. --query-port assertions verify the rules took effect.
+# No || true: a silent failure here would leave the firewall ports closed and
+# the deployed VM unreachable, so the build must fail loudly.
+# --query-port assertions verify the rules took effect.
 #
-# Bug 7 fix (v2): python3-gobject only ships a cpython-39 .so — gi is not
+# python3-gobject only ships a cpython-39 .so — gi is not
 # available under python3.12. Call python3.9 explicitly so
 # firewall-offline-cmd uses the interpreter that has gi installed.
 RUN python3.9 /usr/bin/firewall-offline-cmd --add-port=27017/tcp --add-port=8080/tcp \
@@ -855,8 +817,8 @@ RUN python3.9 /usr/bin/firewall-offline-cmd --add-port=27017/tcp --add-port=8080
 #   [install.block]            — "direct" or "tpm2-luks"
 #
 # Per-partition sizing (/, /boot, /var/log, /var/lib/mongo) is NOT configurable
-# here. BIB uses its own defaults for partition layout. The DataVolume diskSizeGi
-# Helm value controls the final PVC size (CDI expands the qcow2 at import).
+# here. BIB uses its own defaults for partition layout. The size of the disk the
+# image is deployed to determines the final filesystem size.
 # bootc-install-config(5) schema (bootc 1.16):
 #   Only [install.filesystem.root], [install.kargs], [install.block] are valid.
 #   There is NO per-partition sizing in this format — that is handled by BIB
@@ -864,11 +826,11 @@ RUN python3.9 /usr/bin/firewall-offline-cmd --add-port=27017/tcp --add-port=8080
 #   The only thing we can specify here is the root filesystem TYPE.
 #
 # Partition layout is achieved via BIB's --rootfs flag (passed at BIB runtime)
-# and the DataVolume diskSizeGi Helm value (CDI expands at import time).
+# and by the size of the disk the image is deployed to.
 RUN mkdir -p /usr/lib/bootc/install && \
     cat > /usr/lib/bootc/install/10-disk-layout.toml <<'BIBCFG'
-# bootc-install-config(5) drop-in for MongoDB EA bootc image
-# Root filesystem: xfs (required for MongoDB EA performance + RHEL 9 default)
+# bootc-install-config(5) drop-in for the MongoDB bootc image
+# Root filesystem: xfs (recommended for MongoDB performance + RHEL 9 default)
 [install.filesystem.root]
 type = "xfs"
 
@@ -909,7 +871,7 @@ CONFEOF
 RUN chown root:mongod /etc/mongod.conf && chmod 640 /etc/mongod.conf
 
 # ---------------------------------------------------------------------------
-# SECTION 9a-aide — AIDE File Integrity Monitoring (mdb-gov-02 / iscf-sc-04)
+# SECTION 9a-aide — AIDE File Integrity Monitoring
 # ---------------------------------------------------------------------------
 # AIDE (Advanced Intrusion Detection Environment) provides file-integrity
 # monitoring for the bootc image. The database is initialised HERE at image
@@ -918,18 +880,18 @@ RUN chown root:mongod /etc/mongod.conf && chmod 640 /etc/mongod.conf
 # Timer design:
 #   aide-check.service  — one-shot unit: --init on first boot, --check on subsequent boots
 #                         output to journal only (never floods serial console)
-#   aide-check.timer    — fires daily at 02:00 + 10 min after boot (via timer only, not multi-user.target)
+#   aide-check.timer    — fires daily at 02:00 (±5 min randomized), never at boot
 #
 # aide --init populates /var/lib/aide/aide.db.new.gz; we rename it to
 # aide.db.gz so aide --check can find the baseline without manual post-boot steps.
 #
 # NOTE: The database is built against the CONTAINER filesystem at build time.
-# At runtime the first real check (OnBootSec=30min) validates the live VM disk.
+# At runtime the first scheduled check (daily at 02:00) validates the live VM disk.
 # Any changes made by cloud-init (credential writes, mongod.conf rewrites) will
 # appear as changes — this is expected and correct, as they happen AFTER the
 # baseline was taken.
-COPY scripts/aide-check.service /etc/systemd/system/aide-check.service
-COPY scripts/aide-check.timer   /etc/systemd/system/aide-check.timer
+COPY units/aide-check.service /etc/systemd/system/aide-check.service
+COPY units/aide-check.timer   /etc/systemd/system/aide-check.timer
 
 RUN chmod 0644 \
         /etc/systemd/system/aide-check.service \
@@ -946,19 +908,19 @@ RUN mkdir -p /var/lib/aide && \
 RUN systemctl enable aide-check.timer
 
 # ---------------------------------------------------------------------------
-# SECTION 9b — Rebuild RPM database for Quay Clair package indexing
+# SECTION 9b — Rebuild RPM database for image-scanner package indexing
 # ---------------------------------------------------------------------------
-# WHY THIS IS REQUIRED FOR QUAY CLAIR SCANNING:
-#   Quay Clair's ClairCore package indexer (rhel-packages matcher) walks the
-#   image layers and queries the RPM database at /var/lib/rpm/ to enumerate
+# WHY THIS IS REQUIRED FOR IMAGE SCANNING:
+#   Image scanners such as Clair (ClairCore) walk the
+#   image layers and query the RPM database at /var/lib/rpm/ to enumerate
 #   all installed packages and their EVR (epoch-version-release) tuples.
 #   The STIG remediation layer (Section 8b) runs oscap --remediate, which
 #   installs and removes RPMs as part of hardening.  Multiple successive RPM
 #   operations across separate RUN layers can leave the BerkeleyDB-backed RPM
 #   database in an inconsistent state (orphaned lock files, uncommitted
-#   transactions).  When Clair tries to open the database to read the package
+#   transactions).  When a scanner tries to open the database to read the package
 #   manifest, it may encounter "db4 error" or return an empty package list —
-#   producing a scan with zero findings that Quay silently suppresses.
+#   producing a scan with zero findings.
 #
 #   rpm --rebuilddb rebuilds the database from the installed package headers,
 #   producing a clean, consistent, immediately readable database.  This must
@@ -966,32 +928,25 @@ RUN systemctl enable aide-check.timer
 #
 #   This step does NOT modify any installed packages or security settings.
 RUN rm -f /usr/share/rpmrebuilddb.* 2>/dev/null || true; \
-    rpm --rebuilddb && echo "[Clair-fix] RPM database rebuilt." || \
-    echo "[Clair-fix] WARNING: rpm --rebuilddb failed (non-fatal on overlay fs)"
+    rpm --rebuilddb && echo "[scanner-fix] RPM database rebuilt." || \
+    echo "[scanner-fix] WARNING: rpm --rebuilddb failed (non-fatal on overlay fs)"
 
 # ---------------------------------------------------------------------------
 # SECTION 10 — Image metadata
 # ---------------------------------------------------------------------------
-# IMPORTANT — Quay Clair version label requirements:
+# IMPORTANT — version label requirements:
 #   org.opencontainers.image.version MUST contain a concrete version string
-#   (e.g. "8.3.12"), never an unexpanded build-arg token (e.g. "${IMAGE_TAG}").
-#   Quay uses this label as part of the Clair index cache key.  An unexpanded
-#   token causes cache collisions across builds, causing Clair to return stale
+#   (e.g. "1.0.0"), never an unexpanded build-arg token (e.g. "${IMAGE_TAG}").
+#   Registries and scanners may use this label as part of an index cache key.  An
+#   unexpanded token causes cache collisions across builds, causing stale
 #   or absent scan results.
 #
-#   The ARG IMAGE_TAG above is always supplied by build.sh via --build-arg
+#   The ARG IMAGE_TAG above is always supplied by build-image.sh via --build-arg
 #   IMAGE_TAG=<concrete-version>.  Podman/buildah expands ARG references in
 #   LABEL instructions to their resolved value at build time, so the OCI image
 #   config JSON will contain the actual version string, not the ARG name.
 #   Verify with: podman inspect --format '{{index .Labels "org.opencontainers.image.version"}}' <image>
-LABEL org.opencontainers.image.title="mongodb-ea-rhel9-bootc"
-LABEL org.opencontainers.image.description="MongoDB Enterprise Advanced 8.x on RHEL 9 (bootc) for OCP Virt s390x"
+LABEL org.opencontainers.image.title="mongodb-rhel9-bootc"
+LABEL org.opencontainers.image.description="MongoDB Enterprise 8.x on RHEL 9 (bootc) for s390x"
 LABEL org.opencontainers.image.version="${IMAGE_TAG}"
 LABEL org.opencontainers.image.architecture="s390x"
-LABEL com.ibm.sovereigncore.compliance.controls="mdb-net-02,mdb-net-04,mdb-rbac-03,mdb-enc-02,mdb-enc-05,mdb-aud-01,mdb-aud-02,mdb-aud-04,mdb-auth-01,mdb-gov-02,mdb-virt-01,mdb-virt-02,mdb-virt-04,mdb-s390x-02"
-LABEL com.ibm.sovereigncore.compliance.iscf-refs="iscf-dr-01,iscf-dr-02,iscf-dr-03,iscf-dr-04,iscf-dr-05,iscf-dr-06,iscf-dr-07,iscf-dr-09,iscf-dr-10,iscf-ia-01,iscf-ia-04,iscf-gov-02,iscf-gov-03,iscf-cr-01,iscf-cr-03,iscf-ai-03,iscf-ai-04"
-LABEL com.ibm.sovereigncore.compliance.in-image="mdb-virt-01,mdb-virt-04,mdb-s390x-02"
-LABEL com.ibm.sovereigncore.compliance.in-chart="mdb-net-02,mdb-net-04,mdb-rbac-03,mdb-enc-05"
-LABEL com.ibm.sovereigncore.compliance.at-runtime="mdb-enc-02,mdb-aud-01,mdb-aud-02"
-LABEL com.ibm.sovereigncore.compliance.external-tooling="mdb-auth-02,mdb-enc-03,mdb-enc-06,mdb-aud-03,mdb-rbac-01,mdb-rbac-02,mdb-rbac-04,mdb-virt-02"
-LABEL com.ibm.sovereigncore.service="mongodb-vm"

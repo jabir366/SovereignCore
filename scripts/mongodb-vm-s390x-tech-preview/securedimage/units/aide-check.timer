@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily AIDE File Integrity Check Timer (mdb-gov-02 / iscf-sc-04)
+Description=Daily AIDE File Integrity Check Timer
 Documentation=man:aide(1)
 # NOTE: no Requires=aide-check.service here. Requires= pulled the (long-running)
 # service into the boot transaction as soon as the timer was started, so AIDE

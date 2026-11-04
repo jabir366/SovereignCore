@@ -1,7 +1,7 @@
 [Unit]
-Description=AIDE File Integrity Check (mdb-gov-02 / iscf-sc-04)
+Description=AIDE File Integrity Check
 Documentation=man:aide(1)
-# Fix 7: Must NOT start until cloud-init has fully completed.
+# Must NOT start until cloud-init has fully completed.
 # AIDE --check running concurrently with cloud-init runcmd causes a PID
 # hierarchy where aide becomes a child of the cloud-init runcmd shell,
 # blocking all subsequent runcmd commands (mongo-first-boot.sh, probe enable).
@@ -35,8 +35,8 @@ StandardOutput=journal
 StandardError=journal
 # If AIDE exits 0  → clean run, no changes.
 # If AIDE exits 1+ → integrity violation; systemd marks unit as failed,
-#                    triggering a journal alert that can be scraped by
-#                    Compliance Operator / Concert.
+#                    triggering a journal alert for external monitoring
+#                    tooling.
 SuccessExitStatus=0 1
 
 # No [Install] section on purpose: WantedBy=aide-check.timer made `systemctl

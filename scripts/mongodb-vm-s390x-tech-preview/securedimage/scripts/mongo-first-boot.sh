@@ -3,7 +3,7 @@
 # /usr/local/bin/mongo-first-boot.sh
 # =============================================================================
 #
-# Baked into rhel9-mongodb-ea-8.3.2-s390x.qcow2 at image build time.
+# Baked into the disk image at build time.
 # Triggered by cloud-init runcmd ONLY — never by systemd directly.
 # Reads /etc/mongo-init-env (written by cloud-init) for all configuration.
 #
@@ -35,7 +35,7 @@
 #     window is never exposed to the pod network.
 #
 # ── COMPLIANCE Phase 2 blocks (injected at step 8) ───────────────────────────
-# /etc/mongo-compliance-env is written by cloud-init (chart/templates/_helpers.tpl)
+# /etc/mongo-compliance-env is written by cloud-init
 # and sourced at step 8 to optionally extend mongod.conf BEFORE the first
 # external-facing start. No image rebuild required — flags are per-instance.
 #
@@ -47,26 +47,26 @@
 #   3. Restarts rsyslog so the new config is active.
 #
 # No image rebuild is required — all parameters are per-instance values
-# injected by Helm via cloud-init write_files.
+# injected via cloud-init write_files.
 #
 #   MONGO_COMPLIANCE_ENCRYPTION=true
-#     → mdb-enc-02 (iscf-cr-01/dr-06)
+#     → encryption at rest
 #     Generates /etc/mongodb-encryption-key (once) and sets security.enableEncryption
 #     + security.encryptionKeyFile in BOTH the standalone and final mongod.conf, so the
 #     data files are encrypted from creation (step 1c).
 #     Requires: MongoDB Enterprise Advanced licence. Needs an empty dbPath.
-#     Pair with: storageClassName = ocs-storagecluster-ceph-rbd-encrypted (mdb-enc-05).
+#     Pair with an encrypted storage class for the underlying volume.
 #
 #   MONGO_COMPLIANCE_AUDIT=true
-#     → mdb-aud-01 (iscf-ia-04/gov-03/dr-10) + mdb-aud-02 (iscf-ia-04/gov-02/ai-04)
+#     → audit logging
 #     Appends auditLog block + setParameter.auditAuthorizationSuccess to mongod.conf.
 #     auditAuthorizationSuccess=true: logs ALL auth decisions, not just failures.
 #     Default audit path: /var/log/mongodb/audit.json
 #
 #   Controls NOT handled here (external tooling required):
-#     mdb-aud-03  log retention >= 90 days → Compliance Operator (log volume policy)
-#     mdb-enc-03  key rotation < 365 days  → RHACS + KMIP/Vault
-#     mdb-enc-06  KMIP key server          → cluster-level infra
+#     log retention >= 90 days → log volume policy of the platform
+#     key rotation < 365 days  → external key management
+#     KMIP key server          → platform-level infrastructure
 # =============================================================================
 
 set -euo pipefail
@@ -137,7 +137,7 @@ rm -f /tmp/mongodb-27017.sock 2>/dev/null || true
 rm -f /var/lib/mongo/mongod.lock /var/lib/mongo/WiredTiger.lock 2>/dev/null || true
 
 # ── 1b. Load Phase 2 compliance flags (always present — written by cloud-init) ──
-# File is always written by Helm even when all flags are false. Loaded HERE, before
+# File is always written by the provisioner even when all flags are false. Loaded HERE, before
 # the first mongod start, because WiredTiger encryption can only be enabled on an
 # empty dbPath: the standalone setup phase must already run with it.
 # shellcheck disable=SC1091
@@ -150,26 +150,26 @@ MONGO_COMPLIANCE_AUDIT="${MONGO_COMPLIANCE_AUDIT:-false}"
 MONGO_COMPLIANCE_AUDIT_PATH="${MONGO_COMPLIANCE_AUDIT_PATH:-/var/log/mongodb/audit.json}"
 MONGO_COMPLIANCE_AUDIT_AUTH_SUCCESS="${MONGO_COMPLIANCE_AUDIT_AUTH_SUCCESS:-true}"
 
-# ── 1c. mdb-enc-02 (iscf-cr-01/dr-06) — WiredTiger encryption at rest ────────
+# ── 1c. WiredTiger encryption at rest ────────
 # Needs a key: enableEncryption alone makes mongod exit. A per-node local key
 # file (32 random bytes, base64 = AES-256) is generated once and then reused —
 # regenerating it would make the existing data unreadable. Mode 400, owner mongod
 # (mongod refuses a key file that is group/world accessible). Lives in /etc so the
 # mongod_t SELinux domain can read it (same as /etc/mongodb-keyfile).
 # NOTE: the key sits on the same disk as the data. For separation of key and data
-# use KMIP (mdb-enc-06) instead of encryptionKeyFile.
+# use KMIP instead of encryptionKeyFile.
 ENC_KEYFILE=/etc/mongodb-encryption-key
 ENC_SEC_LINES=""
 ENC_STANDALONE_SECURITY=""
 if [ "${MONGO_COMPLIANCE_ENCRYPTION}" = "true" ]; then
-  echo "[mongo-first-boot] COMPLIANCE mdb-enc-02: enabling WiredTiger encryption-at-rest..."
+  echo "[mongo-first-boot] COMPLIANCE encryption-at-rest: enabling WiredTiger encryption-at-rest..."
   if [ ! -s "$ENC_KEYFILE" ]; then
     if [ -e /var/lib/mongo/WiredTiger.wt ]; then
       echo "[mongo-first-boot] ERROR: /var/lib/mongo already holds unencrypted data files — encryption cannot be enabled on an existing dbPath. Use a fresh disk." >&2
       exit 1
     fi
     (umask 077; openssl rand -base64 32 > "$ENC_KEYFILE")
-    echo "[mongo-first-boot] mdb-enc-02: generated ${ENC_KEYFILE}."
+    echo "[mongo-first-boot] encryption-at-rest: generated ${ENC_KEYFILE}."
   fi
   chown mongod:mongod "$ENC_KEYFILE"
   chmod 400 "$ENC_KEYFILE"
@@ -318,23 +318,21 @@ setParameter:
   diagnosticDataCollectionEnabled: false
 EOF
 
-# ── 6b. COMPLIANCE Phase 2 — mdb-enc-02 (iscf-cr-01/dr-06) ─────────────────
+# ── 6b. COMPLIANCE Phase 2 — encryption at rest ─────────────────
 # Encryption at rest is written into the security: block above (ENC_SEC_LINES,
 # built in step 1c) — NOT appended here. An append at end-of-file lands under
 # setParameter: and mongod exits with "Unknown --setParameter 'enableEncryption'".
 
-# ── 6c. COMPLIANCE Phase 2 — mdb-aud-01 + mdb-aud-02 ────────────────────────
-# mdb-aud-01 → iscf-ia-04 · iscf-gov-03 · iscf-dr-10
-# mdb-aud-02 → iscf-ia-04 · iscf-gov-02 · iscf-ai-04
+# ── 6c. COMPLIANCE Phase 2 — audit logging ────────────────────────
 # Appends auditLog block + setParameter block to mongod.conf.
 # auditAuthorizationSuccess=true: logs ALL auth decisions (not just failures).
 # Default audit path: /var/log/mongodb/audit.json
 if [ "${MONGO_COMPLIANCE_AUDIT}" = "true" ]; then
-  echo "[mongo-first-boot] COMPLIANCE mdb-aud-01+02: enabling JSON audit log at ${MONGO_COMPLIANCE_AUDIT_PATH}..."
+  echo "[mongo-first-boot] COMPLIANCE audit-log: enabling JSON audit log at ${MONGO_COMPLIANCE_AUDIT_PATH}..."
   # Ensure the audit log directory exists and is owned by mongod
   mkdir -p "$(dirname "${MONGO_COMPLIANCE_AUDIT_PATH}")"
   chown mongod:mongod "$(dirname "${MONGO_COMPLIANCE_AUDIT_PATH}")"
-  # mdb-aud-04: set append-only on audit log so mongod process cannot delete it
+  # Set append-only on audit log so mongod process cannot delete it
   # chattr +a prevents unlink/truncate; mongod can still append new records.
   # Requires: ext4 or xfs filesystem with chattr support. Silently skipped otherwise.
   touch "${MONGO_COMPLIANCE_AUDIT_PATH}" 2>/dev/null || true
@@ -345,12 +343,11 @@ if [ "${MONGO_COMPLIANCE_AUDIT}" = "true" ]; then
   chown mongod:mongod "${MONGO_COMPLIANCE_AUDIT_PATH}"
   chmod 640 "${MONGO_COMPLIANCE_AUDIT_PATH}"
   chattr +a "${MONGO_COMPLIANCE_AUDIT_PATH}" 2>/dev/null \
-    && echo "[mongo-first-boot] mdb-aud-04: chattr +a applied to ${MONGO_COMPLIANCE_AUDIT_PATH}" \
-    || echo "[mongo-first-boot] mdb-aud-04: WARNING chattr +a failed — filesystem may not support it"
+    && echo "[mongo-first-boot] audit-log: chattr +a applied to ${MONGO_COMPLIANCE_AUDIT_PATH}" \
+    || echo "[mongo-first-boot] audit-log: WARNING chattr +a failed — filesystem may not support it"
   cat >> "$MONGOD_CONF" << EOF
 
-## COMPLIANCE mdb-aud-01 → iscf-ia-04 · iscf-gov-03 · iscf-dr-10
-## COMPLIANCE mdb-aud-02 → iscf-ia-04 · iscf-gov-02 · iscf-ai-04
+## COMPLIANCE audit logging
 auditLog:
   destination: file
   format: JSON
@@ -423,23 +420,23 @@ if ! systemctl is-active --quiet mongod.service; then
   exit 1
 fi
 
-# ── 7. NTP stratum check — mdb-vm-01 (iscf-mi-03) ───────────────────────────
+# ── 7. NTP stratum check ───────────────────────────
 # Verify chrony is tracking before writing the sentinel file.
 # Audit log timestamps are only legally defensible when NTP-synchronised.
 # A warning (not an error) is logged if stratum > 4 — MongoDB still starts.
 NTP_STRATUM=$(chronyc tracking 2>/dev/null | awk '/^Stratum/ {print $3}')
 if [ -z "${NTP_STRATUM}" ]; then
   logger -t mongo-first-boot -p daemon.warning \
-    "mdb-vm-01: chronyc tracking failed — NTP status unknown. Audit timestamps may be unreliable."
-  echo "[mongo-first-boot] mdb-vm-01: WARNING chronyc not responding — NTP unverified."
+    "NTP: chronyc tracking failed — NTP status unknown. Audit timestamps may be unreliable."
+  echo "[mongo-first-boot] NTP: WARNING chronyc not responding — NTP unverified."
 elif [ "${NTP_STRATUM}" -gt 4 ] 2>/dev/null; then
   logger -t mongo-first-boot -p daemon.warning \
-    "mdb-vm-01: NTP stratum ${NTP_STRATUM} exceeds threshold (>4). Audit timestamps may be unreliable."
-  echo "[mongo-first-boot] mdb-vm-01: WARNING NTP stratum ${NTP_STRATUM} > 4 — timestamps unreliable."
+    "NTP: NTP stratum ${NTP_STRATUM} exceeds threshold (>4). Audit timestamps may be unreliable."
+  echo "[mongo-first-boot] NTP: WARNING NTP stratum ${NTP_STRATUM} > 4 — timestamps unreliable."
 else
   logger -t mongo-first-boot -p daemon.info \
-    "mdb-vm-01: NTP stratum ${NTP_STRATUM} — time sync verified."
-  echo "[mongo-first-boot] mdb-vm-01: NTP stratum ${NTP_STRATUM} — time sync verified."
+    "NTP: NTP stratum ${NTP_STRATUM} — time sync verified."
+  echo "[mongo-first-boot] NTP: NTP stratum ${NTP_STRATUM} — time sync verified."
 fi
 
 # ── 8. Write sentinel ────────────────────────────────────────────────────────
@@ -557,7 +554,7 @@ RSYSLOG_EOF
   # ── Append verbatim custom config if provided ────────────────────────────
   if [ -f /etc/mongo-rsyslog-custom.conf ]; then
     echo "" >> "${RSYSLOG_DROPIN}"
-    echo "# Custom rsyslog rules (from values.yaml logging.rsyslog.customConf)" >> "${RSYSLOG_DROPIN}"
+    echo "# Custom rsyslog rules (from /etc/mongo-rsyslog-custom.conf)" >> "${RSYSLOG_DROPIN}"
     cat /etc/mongo-rsyslog-custom.conf >> "${RSYSLOG_DROPIN}"
     echo "[mongo-first-boot] rsyslog: appended custom config from /etc/mongo-rsyslog-custom.conf"
   fi
@@ -596,16 +593,16 @@ if [ -f /etc/mongo-rs-init.env ]; then
   echo "[mongo-first-boot] mongo-rs-init.service started."
 fi
 
-# ── mdb-enc-06: shred /etc/mongo-init-env after use ─────────
+# ── Shred /etc/mongo-init-env after use ─────────
 # The file was already written 0600 by cloud-init. Shredding it ensures
 # credentials are not recoverable from disk after first-boot completes.
 # 'shred -u' overwrites then unlinks; fallback to plain rm if shred unavailable.
 if [ -f /etc/mongo-init-env ]; then
   if shred -u /etc/mongo-init-env 2>/dev/null; then
-    echo "[mongo-first-boot] mdb-enc-06: /etc/mongo-init-env shredded."
+    echo "[mongo-first-boot] /etc/mongo-init-env shredded."
   else
     rm -f /etc/mongo-init-env
-    echo "[mongo-first-boot] mdb-enc-06: /etc/mongo-init-env removed (shred unavailable)."
+    echo "[mongo-first-boot] /etc/mongo-init-env removed (shred unavailable)."
   fi
 fi
 

@@ -1,6 +1,5 @@
 [Unit]
 Description=MongoDB replica-set initiation (member-0 only, retries until done)
-Documentation=https://github.com/IBM/sovereigncore
 # /etc/mongo-rs-init.env is written by cloud-init on member-0 only and removed by
 # mongo-rs-init.sh once the replica set is initiated and a PRIMARY exists. If the
 # VM reboots before that, this unit runs again at boot and picks up where it
