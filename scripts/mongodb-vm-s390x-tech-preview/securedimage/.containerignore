@@ -1,0 +1,13 @@
+output/
+logs/
+*.qcow2
+*.raw
+*.img
+*.iso
+*.log
+config.env
+config.env.example
+.git/
+.gitignore
+Makefile
+Containerfile.disk

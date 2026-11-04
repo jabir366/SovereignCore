@@ -9,7 +9,7 @@
 # accessible to root at build time and survives bootc/ostree label restoration —
 # unlike /etc/audit/rules.d/ which has auditd_conf_t:0700 and is inaccessible
 # to unconfined_t processes even as root.
-set -e
+set -euo pipefail
 
 D=/usr/share/audit/rules.d
 mkdir -p "$D"

@@ -5,7 +5,7 @@ Lightweight HTTP server baked into the bootc image.
 Returns 200 + "PRIMARY\n"   if this mongod is the RS primary.
 Returns 503 + "NOT PRIMARY\n" otherwise.
 
-Runs as mongo-primary-probe.service, started by cloud-init runcmd (vip.enabled=true).
+Runs as mongo-primary-probe.service, started by cloud-init runcmd.
 KubeVirt readinessProbe.httpGet /health:8080 uses the 200/503 response to gate
 VIP endpoint selection so only the primary receives client traffic.
 
@@ -60,6 +60,6 @@ class ProbeHandler(BaseHTTPRequestHandler):
 
 
 # Bind 0.0.0.0: KubeVirt masquerade reaches the guest on the pod-network address,
-# not on loopback. Exposure is limited by the chart NetworkPolicy (8080 ingress:
-# same-namespace pods only).
+# not on loopback. Exposure is limited by the network policy of the
+# deployment (restrict port 8080 ingress to trusted peers).
 HTTPServer(("0.0.0.0", PORT), ProbeHandler).serve_forever()

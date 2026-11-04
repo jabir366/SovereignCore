@@ -3,9 +3,9 @@
 # /usr/local/bin/mongo-rs-init.sh
 # =============================================================================
 #
-# Baked into rhel9-mongodb-ea-8.3.2-s390x.qcow2 at image build time.
-# Runs ONLY on member-0 (MONGO_RS_INDEX=0 set in cloud-init runcmd by
-# chart/templates/_helpers.tpl). Triggered by cloud-init runcmd AFTER
+# Baked into the disk image at build time.
+# Runs ONLY on member-0 (MONGO_RS_INDEX=0 set in cloud-init runcmd)
+# Triggered by cloud-init runcmd AFTER
 # mongo-first-boot.sh has completed on member-0.
 #
 # ── Step map ─────────────────────────────────────────────────────────────────
@@ -54,7 +54,7 @@ ENV_FILE=/etc/mongo-rs-init.env
 # shellcheck disable=SC1091
 set -a && . "$ENV_FILE" && set +a
 
-# Remove the plaintext credentials once the RS is up (mdb-enc-06: no long-lived
+# Remove the plaintext credentials once the RS is up (no long-lived
 # plaintext credential files). Called on every successful exit path.
 cleanup_env() {
   shred -u "$ENV_FILE" 2>/dev/null || rm -f "$ENV_FILE"

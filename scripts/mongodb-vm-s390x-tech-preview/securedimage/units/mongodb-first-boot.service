@@ -1,6 +1,5 @@
 [Unit]
 Description=MongoDB Enterprise Advanced — first-boot initialisation
-Documentation=https://github.com/IBM/sovereigncore
 #
 # Ordering: this unit is triggered by cloud-init runcmd via `systemctl start`
 # AFTER cloud-init has written /etc/mongo-init-env. Do NOT list cloud-init.service
@@ -38,7 +37,7 @@ TimeoutStartSec=600
 #   systemctl start mongodb-first-boot.service
 # This gives cloud-init full control over the exact moment the unit fires —
 # specifically, only AFTER /etc/mongo-init-env has been written with the
-# credentials injected by the Helm chart _helpers.tpl.
+# credentials injected by the provisioner.
 #
 # If this unit were enabled at boot, it would race against cloud-init and
 # likely fail because /etc/mongo-init-env would not yet exist.
