@@ -251,6 +251,9 @@ spec:
                   name: openshift-storage
                   labels:
                     openshift.io/cluster-monitoring: "true"
+                    pod-security.kubernetes.io/enforce: privileged
+                    pod-security.kubernetes.io/audit: privileged
+                    pod-security.kubernetes.io/warn: privileged
     - objectDefinition:
         apiVersion: policy.open-cluster-management.io/v1
         kind: ConfigurationPolicy
@@ -292,6 +295,25 @@ spec:
                   name: odf-operator
                   source: ${CATALOG_SOURCE}
                   sourceNamespace: ${CATALOG_SOURCE_NS}
+    - objectDefinition:
+        apiVersion: policy.open-cluster-management.io/v1
+        kind: ConfigurationPolicy
+        metadata:
+          name: odf-client-csv-status
+        spec:
+          remediationAction: inform
+          severity: high
+          object-templates:
+            - complianceType: musthave
+              objectDefinition:
+                apiVersion: operators.coreos.com/v1alpha1
+                kind: ClusterServiceVersion
+                metadata:
+                  namespace: openshift-storage
+                spec:
+                  displayName: OpenShift Data Foundation
+                status:
+                  phase: Succeeded
 ---
 apiVersion: apps.open-cluster-management.io/v1
 kind: PlacementRule
