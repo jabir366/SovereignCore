@@ -54,6 +54,17 @@ ENV_FILE=/etc/mongo-rs-init.env
 # shellcheck disable=SC1091
 set -a && . "$ENV_FILE" && set +a
 
+# TLS flags (Phase 3) — /etc/mongo-tls-env is written by cloud-init and
+# persists in /etc (nothing shreds it), so RS formation works over TLS after
+# any reboot that happens before a PRIMARY exists. Sourced AFTER the
+# credentials env so both are exported for the pymongo call sites below.
+# shellcheck disable=SC1091
+if [ -f /etc/mongo-tls-env ]; then
+  set -a && . /etc/mongo-tls-env && set +a
+fi
+MONGO_TLS_ENABLED="${MONGO_TLS_ENABLED:-false}"
+MONGO_TLS_CA_FILE="${MONGO_TLS_CA_FILE:-/etc/mongodb/tls/ca.pem}"
+
 # Remove the plaintext credentials once the RS is up (no long-lived
 # plaintext credential files). Called on every successful exit path.
 cleanup_env() {
@@ -99,11 +110,16 @@ import pymongo, os, sys
 try:
     # Connect with admin credentials — proves mongod has keyFile loaded and auth enabled.
     # Credentials from os.environ — no shell interpolation in Python string literals.
+    # TLS kwargs from the exported MONGO_TLS_* env (peer FQDNs are covered by
+    # the member SANs; self via localhost is covered by the localhost SAN).
+    kw = {}
+    if os.environ.get('MONGO_TLS_ENABLED') == 'true':
+        kw = dict(tls=True, tlsCAFile=os.environ.get('MONGO_TLS_CA_FILE'))
     c = pymongo.MongoClient(
         f'mongodb://{os.environ[\"PING_HOST\"]}:{os.environ[\"PING_PORT\"]}',
         username='root', password=os.environ['ADMIN_PASS'], authSource='admin',
         authMechanism='SCRAM-SHA-256',
-        serverSelectionTimeoutMS=3000, directConnection=True)
+        serverSelectionTimeoutMS=3000, directConnection=True, **kw)
     c.admin.command('ping')
 except Exception:
     sys.exit(1)
@@ -125,10 +141,13 @@ done
 RS_OK=$(python3.12 -c "
 import pymongo, os
 try:
+    kw = {}
+    if os.environ.get('MONGO_TLS_ENABLED') == 'true':
+        kw = dict(tls=True, tlsCAFile=os.environ.get('MONGO_TLS_CA_FILE'))
     c = pymongo.MongoClient('mongodb://127.0.0.1:27017',
         username='root', password=os.environ['ADMIN_PASS'], authSource='admin',
         authMechanism='SCRAM-SHA-256',
-        serverSelectionTimeoutMS=5000, directConnection=True)
+        serverSelectionTimeoutMS=5000, directConnection=True, **kw)
     status = c.admin.command('replSetGetStatus')
     print('1' if status.get('ok') == 1.0 else '0')
 except Exception:
@@ -165,6 +184,10 @@ members_str = os.environ['MONGO_RS_MEMBERS']
 rs_name     = os.environ['MONGO_RS_NAME']
 admin_pass  = os.environ['ADMIN_PASS']
 
+tlskw = {}
+if os.environ.get('MONGO_TLS_ENABLED') == 'true':
+    tlskw = dict(tls=True, tlsCAFile=os.environ.get('MONGO_TLS_CA_FILE'))
+
 members = []
 for i, hp in enumerate(members_str.split(',')):
     members.append({'_id': i, 'host': hp.strip()})
@@ -175,7 +198,7 @@ print(f'[mongo-rs-init] Initiating RS config: {config}')
 c = pymongo.MongoClient('mongodb://127.0.0.1:27017',
     username='root', password=admin_pass, authSource='admin',
     authMechanism='SCRAM-SHA-256',
-    serverSelectionTimeoutMS=5000, directConnection=True)
+    serverSelectionTimeoutMS=5000, directConnection=True, **tlskw)
 result = c.admin.command('replSetInitiate', config)
 print(f'[mongo-rs-init] replSetInitiate result: {result}')
 PYEOF
@@ -186,10 +209,13 @@ for i in $(seq 1 30); do
   PRIMARY=$(python3.12 << 'PYEOF'
 import pymongo, os
 try:
+    kw = {}
+    if os.environ.get('MONGO_TLS_ENABLED') == 'true':
+        kw = dict(tls=True, tlsCAFile=os.environ.get('MONGO_TLS_CA_FILE'))
     c = pymongo.MongoClient('mongodb://127.0.0.1:27017',
         username='root', password=os.environ['ADMIN_PASS'], authSource='admin',
         authMechanism='SCRAM-SHA-256',
-        serverSelectionTimeoutMS=5000, directConnection=True)
+        serverSelectionTimeoutMS=5000, directConnection=True, **kw)
     status = c.admin.command('replSetGetStatus')
     primaries = [m for m in status['members'] if m['stateStr'] == 'PRIMARY']
     print(len(primaries))
@@ -204,10 +230,13 @@ PYEOF
     # Each line shows:  <hostname:port> -> PRIMARY | SECONDARY | ...
     python3.12 << 'PYEOF'
 import pymongo, os
+kw = {}
+if os.environ.get('MONGO_TLS_ENABLED') == 'true':
+    kw = dict(tls=True, tlsCAFile=os.environ.get('MONGO_TLS_CA_FILE'))
 c = pymongo.MongoClient('mongodb://127.0.0.1:27017',
     username='root', password=os.environ['ADMIN_PASS'], authSource='admin',
     authMechanism='SCRAM-SHA-256',
-    serverSelectionTimeoutMS=5000, directConnection=True)
+    serverSelectionTimeoutMS=5000, directConnection=True, **kw)
 for m in c.admin.command('replSetGetStatus')['members']:
     print(f'  {m["name"]} -> {m["stateStr"]}')
 PYEOF

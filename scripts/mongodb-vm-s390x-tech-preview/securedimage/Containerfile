@@ -150,12 +150,17 @@ RUN mkdir -p \
         /var/lib/mongo \
         /var/log/mongodb \
         /etc/mongodb \
+        /etc/mongodb/tls \
     && chown -R mongod:mongod \
         /var/lib/mongo \
         /var/log/mongodb \
         /etc/mongodb \
     && chmod 750 /var/lib/mongo \
     && chmod 755 /var/log/mongodb
+# /etc/mongodb/tls holds the Vault-issued mongod certificate (server.pem +
+# ca.pem), written at boot by mongo-vault-fetch-certs.py. /etc is writable
+# at runtime and readable by the mongod_t SELinux domain (same reason the
+# keyfile lives in /etc); /usr is read-only OSTree so certs cannot live there.
 
 # ---------------------------------------------------------------------------
 # SECTION 5 — Bake in first-boot scripts
@@ -170,6 +175,12 @@ COPY scripts/mongo-rs-init.sh       /usr/local/bin/mongo-rs-init.sh
 COPY scripts/mongo-primary-probe.py /usr/local/bin/mongo-primary-probe.py
 # Per-boot pod-IP loopback alias (re-created on every boot, before mongod).
 COPY scripts/mongo-pod-alias.sh     /usr/local/bin/mongo-pod-alias.sh
+# Vault PKI TLS bootstrap (Phase 3, mdb-enc-01) — python3.12 + requests only
+# (the image deliberately has no vault CLI, no vault-agent and no curl on
+# s390x). fetch-certs runs before mongod via mongo-vault-certs.service;
+# rotate-certs performs the online rotateCertificates rotation.
+COPY scripts/mongo-vault-fetch-certs.py /usr/local/bin/mongo-vault-fetch-certs.py
+COPY scripts/mongo-rotate-certs.py      /usr/local/bin/mongo-rotate-certs.py
 
 # Explicit chmod after COPY: COPY preserves the mode from the source file, but
 # we set it explicitly here so the permission is correct even if the source
@@ -178,7 +189,9 @@ RUN chmod 0755 \
         /usr/local/bin/mongo-first-boot.sh \
         /usr/local/bin/mongo-rs-init.sh \
         /usr/local/bin/mongo-pod-alias.sh \
-        /usr/local/bin/mongo-primary-probe.py
+        /usr/local/bin/mongo-primary-probe.py \
+        /usr/local/bin/mongo-vault-fetch-certs.py \
+        /usr/local/bin/mongo-rotate-certs.py
 
 # ---------------------------------------------------------------------------
 # SECTION 6 — Systemd unit: mongodb-first-boot.service
@@ -196,9 +209,27 @@ COPY units/mongo-primary-probe.service /etc/systemd/system/mongo-primary-probe.s
 # /etc/mongo-rs-init.env respectively.
 COPY units/mongo-pod-alias.service     /etc/systemd/system/mongo-pod-alias.service
 COPY units/mongo-rs-init.service       /etc/systemd/system/mongo-rs-init.service
+# Vault PKI units — mongo-vault-certs.service is enabled so the per-boot
+# renewal re-check runs Before=mongod.service on every boot; the daily
+# renewal timer drives re-issue + online rotation. Both are guarded by
+# ConditionPathExists=/etc/mongo-vault/env, so they are permanent no-ops on
+# VMs provisioned without Vault TLS.
+COPY units/mongo-vault-certs.service   /etc/systemd/system/mongo-vault-certs.service
+COPY units/mongo-vault-renew.service   /etc/systemd/system/mongo-vault-renew.service
+COPY units/mongo-vault-renew.timer     /etc/systemd/system/mongo-vault-renew.timer
+# Boot-time retry of an aborted first boot (e.g. Vault was unreachable when
+# the TLS cert fetch ran). ConditionPathExists-gated to VMs whose first boot
+# started but never completed — permanent no-op on healthy VMs.
+COPY units/mongodb-first-boot-retry.service /etc/systemd/system/mongodb-first-boot-retry.service
 RUN chmod 0644 /etc/systemd/system/mongo-pod-alias.service \
                /etc/systemd/system/mongo-rs-init.service \
-    && systemctl enable mongo-pod-alias.service mongo-rs-init.service
+               /etc/systemd/system/mongo-vault-certs.service \
+               /etc/systemd/system/mongo-vault-renew.service \
+               /etc/systemd/system/mongo-vault-renew.timer \
+               /etc/systemd/system/mongodb-first-boot-retry.service \
+    && systemctl enable mongo-pod-alias.service mongo-rs-init.service \
+                        mongo-vault-certs.service mongo-vault-renew.timer \
+                        mongodb-first-boot-retry.service
 
 # Do NOT enable at boot — cloud-init runcmd calls `systemctl start` explicitly
 # after writing /etc/mongo-init-env. This prevents a race where the unit fires
