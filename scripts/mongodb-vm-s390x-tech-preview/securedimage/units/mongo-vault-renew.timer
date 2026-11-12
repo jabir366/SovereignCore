@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily mongod TLS certificate renewal check (Vault PKI)
+
+[Timer]
+# Daily check; the fetch script's fast path makes this a no-op while the
+# certificate has more than the renewal margin remaining.
+OnCalendar=daily
+RandomizedDelaySec=30m
+# Catch up after the VM was powered off across the scheduled time.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

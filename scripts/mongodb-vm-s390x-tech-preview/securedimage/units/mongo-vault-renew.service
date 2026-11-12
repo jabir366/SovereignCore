@@ -1,0 +1,28 @@
+[Unit]
+Description=Renew mongod TLS certificates from Vault PKI
+#
+# Triggered daily by mongo-vault-renew.timer. The fetch script exits via its
+# fast path (no Vault login) while the certificate still has margin; inside
+# the renewal window it re-issues at the same paths and stamps
+# /run/mongo-vault/certs-changed, which the ExecStartPost below consumes to
+# rotate the running mongod online (rotateCertificates — no restart, no
+# dropped connections).
+ConditionPathExists=/etc/mongo-vault/env
+After=network-online.target mongod.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3.12 /usr/local/bin/mongo-vault-fetch-certs.py
+# If the fetch stamped certs-changed, rotate the live mongod. The stamp is
+# consumed ONLY on successful rotation — a failed rotate leaves it in place
+# so the next daily run retries, instead of silently leaving mongod serving
+# the old certificate from memory while the expiration sidecar claims it
+# was renewed. A rotate failure also fails this unit (visible in systemctl
+# status); the new files remain on disk for mongod's next start regardless.
+ExecStartPost=/bin/sh -c 'if [ -f /run/mongo-vault/certs-changed ]; then /usr/bin/python3.12 /usr/local/bin/mongo-rotate-certs.py && rm -f /run/mongo-vault/certs-changed; fi'
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

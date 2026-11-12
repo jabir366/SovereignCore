@@ -21,11 +21,41 @@ import pymongo
 
 PORT = 8080
 PASS_FILE = "/etc/mongo-probe-pass"
+TLS_ENV_FILE = "/etc/mongo-tls-env"
+
+
+def _load_tls_env():
+    """Parse /etc/mongo-tls-env (written by cloud-init when compliance.tls
+    is enabled; persists in /etc, nothing shreds it). Returns {} when TLS
+    is off so the probe works identically on non-TLS deployments."""
+    env = {}
+    try:
+        with open(TLS_ENV_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                env[k.strip()] = v.strip().strip('"').strip("'")
+    except FileNotFoundError:
+        pass
+    return env
 
 
 def is_primary():
     try:
         pwd = open(PASS_FILE).read().strip()
+        tlskw = {}
+        tls_env = _load_tls_env()
+        if tls_env.get("MONGO_TLS_ENABLED") == "true":
+            # No client certificate needed: mongod runs with
+            # allowConnectionsWithoutCertificates: true. The cert's
+            # IP SAN 127.0.0.1 covers this loopback connection.
+            tlskw = dict(
+                tls=True,
+                tlsCAFile=tls_env.get(
+                    "MONGO_TLS_CA_FILE", "/etc/mongodb/tls/ca.pem"),
+            )
         c = pymongo.MongoClient(
             "mongodb://127.0.0.1:27017",
             username="root",
@@ -34,6 +64,7 @@ def is_primary():
             authMechanism="SCRAM-SHA-256",
             serverSelectionTimeoutMS=1500,
             directConnection=True,
+            **tlskw,
         )
         return bool(c.admin.command("hello").get("isWritablePrimary"))
     except Exception:

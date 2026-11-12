@@ -9,6 +9,17 @@ Description=MongoDB Enterprise Advanced — first-boot initialisation
 After=network-online.target
 Wants=network-online.target
 #
+# Vault PKI certificate fetch (mongo-vault-certs.service) must complete —
+# or be cleanly skipped via its ConditionPathExists — before first-boot
+# starts mongod. Wants+After orders and waits for it on ALL VMs; when
+# compliance.tls.enabled=true the chart additionally installs a drop-in
+# strengthening this to Requires=, so a failed fetch (Vault unreachable,
+# bad token, blocked egress) blocks first-boot entirely: no certificate,
+# no mongod, never plaintext. A condition-skipped unit must not fail the
+# dependency, which is why the baked unit uses Wants=, not Requires=.
+Wants=mongo-vault-certs.service
+After=mongo-vault-certs.service
+#
 # Require the MongoDB data and log mount points to be available before
 # starting — guards against cases where the DataVolume is not yet bound.
 RequiresMountsFor=/var/lib/mongo /var/log/mongodb

@@ -63,6 +63,23 @@
 #     auditAuthorizationSuccess=true: logs ALL auth decisions, not just failures.
 #     Default audit path: /var/log/mongodb/audit.json
 #
+#   MONGO_TLS_ENABLED=true  (Phase 3, mdb-enc-01 — /etc/mongo-tls-env)
+#     → TLS in transit (net.tls.mode: requireTLS)
+#     The certificate is fetched BEFORE this script runs by
+#     mongo-vault-certs.service (python3.12 + requests against the tenant
+#     Vault PKI). This script FAILS CLOSED if the cert files are missing:
+#     no certificate → no mongod → never a plaintext start.
+#     net.tls is injected into BOTH mongod.conf writes (standalone loopback
+#     and final) via TLS_NET_LINES, following the ENC_SEC_LINES pattern —
+#     requireTLS is active from the very first standalone start.
+#     allowConnectionsWithoutCertificates: true is REQUIRED: MongoDB's
+#     default (false) rejects any client that presents no TLS client
+#     certificate — SCRAM clients included — which would fail the very
+#     first readiness poll below.
+#     Renewal: mongo-vault-renew.timer re-issues near expiry and runs
+#     mongo-rotate-certs.py (rotateCertificates admin command). mongod does
+#     NOT reload certs on SIGHUP (SIGHUP = clean shutdown in 8.0).
+#
 #   Controls NOT handled here (external tooling required):
 #     log retention >= 90 days → log volume policy of the platform
 #     key rotation < 365 days  → external key management
@@ -150,6 +167,20 @@ MONGO_COMPLIANCE_AUDIT="${MONGO_COMPLIANCE_AUDIT:-false}"
 MONGO_COMPLIANCE_AUDIT_PATH="${MONGO_COMPLIANCE_AUDIT_PATH:-/var/log/mongodb/audit.json}"
 MONGO_COMPLIANCE_AUDIT_AUTH_SUCCESS="${MONGO_COMPLIANCE_AUDIT_AUTH_SUCCESS:-true}"
 
+# ── 1b2. TLS flags (Phase 3 — written by cloud-init when compliance.tls.enabled) ──
+# /etc/mongo-tls-env persists in /etc (nothing shreds it), so it is also
+# available to mongo-rs-init.sh and the probe after reboots. Loaded HERE so
+# the TLS net.tls lines are known before the FIRST standalone mongod start
+# (requireTLS must be active from the very first start — see step 2).
+# shellcheck disable=SC1091
+if [ -f /etc/mongo-tls-env ]; then
+  set -a && . /etc/mongo-tls-env && set +a
+fi
+MONGO_TLS_ENABLED="${MONGO_TLS_ENABLED:-false}"
+MONGO_TLS_CERT_FILE="${MONGO_TLS_CERT_FILE:-/etc/mongodb/tls/server.pem}"
+MONGO_TLS_CA_FILE="${MONGO_TLS_CA_FILE:-/etc/mongodb/tls/ca.pem}"
+MONGO_TLS_MIN_VERSION="${MONGO_TLS_MIN_VERSION:-TLS1_2}"
+
 # ── 1c. WiredTiger encryption at rest ────────
 # Needs a key: enableEncryption alone makes mongod exit. A per-node local key
 # file (32 random bytes, base64 = AES-256) is generated once and then reused —
@@ -177,6 +208,40 @@ if [ "${MONGO_COMPLIANCE_ENCRYPTION}" = "true" ]; then
   ENC_STANDALONE_SECURITY=$'security:\n'"${ENC_SEC_LINES}"$'\n'
 fi
 
+# ── 1d. TLS in transit (Phase 3, mdb-enc-01 — certificates from Vault PKI) ───
+# The certificate was fetched by mongo-vault-certs.service (cloud-init runcmd
+# starts it BEFORE this script; mongodb-first-boot.service also orders
+# After=mongo-vault-certs.service). FAIL CLOSED: if TLS is enabled but the
+# certificate files are missing or unreadable, exit 1 — mongod must NEVER
+# start in plaintext as a fallback.
+TLS_NET_LINES=""
+TLS_SETPARAM_LINE=""
+if [ "${MONGO_TLS_ENABLED}" = "true" ]; then
+  echo "[mongo-first-boot] TLS: enabling net.tls.mode=requireTLS..."
+  if [ "${MONGO_TLS_MIN_VERSION}" != "TLS1_2" ]; then
+    echo "[mongo-first-boot] ERROR: unsupported MONGO_TLS_MIN_VERSION '${MONGO_TLS_MIN_VERSION}' (only TLS1_2).mongod has no native minimum-version option — it maps to net.tls.disabledProtocols." >&2
+    exit 1
+  fi
+  if [ ! -s "${MONGO_TLS_CERT_FILE}" ] || [ ! -s "${MONGO_TLS_CA_FILE}" ]; then
+    echo "[mongo-first-boot] ERROR: MONGO_TLS_ENABLED=true but ${MONGO_TLS_CERT_FILE} or ${MONGO_TLS_CA_FILE} is missing/empty — refusing to start mongod in plaintext. Check 'journalctl -u mongo-vault-certs.service' and /var/log/mongo-vault-fetch.log." >&2
+    exit 1
+  fi
+  chown mongod:mongod "${MONGO_TLS_CERT_FILE}" "${MONGO_TLS_CA_FILE}"
+  chmod 400 "${MONGO_TLS_CERT_FILE}"
+  chmod 440 "${MONGO_TLS_CA_FILE}"
+  # Injected under net: in BOTH config writes below (same pattern as
+  # ENC_SEC_LINES). allowConnectionsWithoutCertificates: true is REQUIRED —
+  # MongoDB's default (false) rejects clients that present no TLS client
+  # certificate (SCRAM included) and the first readiness poll would fail.
+  # disabledProtocols: comma-separated, NO spaces (a space makes mongod exit).
+  TLS_NET_LINES=$'  tls:\n    mode: requireTLS\n    certificateKeyFile: '"${MONGO_TLS_CERT_FILE}"$'\n    CAFile: '"${MONGO_TLS_CA_FILE}"$'\n    allowConnectionsWithoutCertificates: true\n    disabledProtocols: TLS1_0,TLS1_1\n    FIPSMode: true'
+  # While RS member auth stays keyFile (x509 is the later stage): do not
+  # present the server certificate as a client cert on outbound connections.
+  # Remove this line when security.clusterAuthMode: x509 lands.
+  TLS_SETPARAM_LINE="  tlsWithholdClientCertificate: true"
+  echo "[mongo-first-boot] TLS: requireTLS with certificateKeyFile=${MONGO_TLS_CERT_FILE}"
+fi
+
 echo "[mongo-first-boot] Writing mongod.conf (loopback-only, standalone, no-auth)..."
 cat > "$MONGOD_CONF" << EOF
 systemLog:
@@ -190,6 +255,7 @@ storage:
 net:
   port: 27017
   bindIp: 127.0.0.1
+${TLS_NET_LINES}
 
 processManagement:
   timeZoneInfo: /usr/share/zoneinfo
@@ -197,6 +263,7 @@ processManagement:
 ${ENC_STANDALONE_SECURITY}
 setParameter:
   diagnosticDataCollectionEnabled: false
+${TLS_SETPARAM_LINE}
 EOF
 
 # ── 3. Start mongod in standalone mode (loopback only, no auth, no replication)
@@ -218,8 +285,18 @@ sleep 8
 # NOTE: Use single-quoted inline python — on s390x with FIPS enabled, pymongo
 # running from a .py file returns exit 1 even on success due to a BrokenPipeError
 # when stderr is redirected.  Single-quoted inline avoids the file-exec issue.
+# TLS: kwargs come from the exported MONGO_TLS_* env (sourced from
+# /etc/mongo-tls-env above) so the same call works with and without TLS.
 for i in $(seq 1 60); do
-  if python3.12 -c 'import pymongo,sys,warnings;warnings.filterwarnings("ignore");c=pymongo.MongoClient("mongodb://127.0.0.1:27017",serverSelectionTimeoutMS=2000,directConnection=True);c.admin.command("ping");sys.exit(0)'; then
+  if python3.12 -c '
+import pymongo, sys, warnings, os
+warnings.filterwarnings("ignore")
+kw = {}
+if os.environ.get("MONGO_TLS_ENABLED") == "true":
+    kw = dict(tls=True, tlsCAFile=os.environ.get("MONGO_TLS_CA_FILE"))
+c = pymongo.MongoClient("mongodb://127.0.0.1:27017", serverSelectionTimeoutMS=2000, directConnection=True, **kw)
+c.admin.command("ping")
+sys.exit(0)'; then
     echo "[mongo-first-boot] mongod is accepting connections."
     break
   fi
@@ -228,7 +305,15 @@ for i in $(seq 1 60); do
 done
 
 # Hard readiness guard after the polling loop.
-if ! python3.12 -c 'import pymongo,sys,warnings;warnings.filterwarnings("ignore");c=pymongo.MongoClient("mongodb://127.0.0.1:27017",serverSelectionTimeoutMS=3000,directConnection=True);c.admin.command("ping");sys.exit(0)'; then
+if ! python3.12 -c '
+import pymongo, sys, warnings, os
+warnings.filterwarnings("ignore")
+kw = {}
+if os.environ.get("MONGO_TLS_ENABLED") == "true":
+    kw = dict(tls=True, tlsCAFile=os.environ.get("MONGO_TLS_CA_FILE"))
+c = pymongo.MongoClient("mongodb://127.0.0.1:27017", serverSelectionTimeoutMS=3000, directConnection=True, **kw)
+c.admin.command("ping")
+sys.exit(0)'; then
   echo "[mongo-first-boot] ERROR: mongod did not become ready after 120s — aborting" >&2
   exit 1
 fi
@@ -243,8 +328,13 @@ warnings.filterwarnings('ignore')
 admin_pass = os.environ['ADMIN_PASS']
 # Connect without auth (standalone, no-auth mode) to create the first user.
 # Do NOT specify authMechanism here — there is no auth yet, so no mechanism needed.
+# TLS kwargs from the exported MONGO_TLS_* env (see step 1b2) — with
+# allowConnectionsWithoutCertificates: true no client certificate is needed.
+tlskw = {}
+if os.environ.get('MONGO_TLS_ENABLED') == 'true':
+    tlskw = dict(tls=True, tlsCAFile=os.environ.get('MONGO_TLS_CA_FILE'))
 c = pymongo.MongoClient('mongodb://127.0.0.1:27017', serverSelectionTimeoutMS=5000,
-    directConnection=True)
+    directConnection=True, **tlskw)
 db = c['admin']
 existing = [u['user'] for u in db.command('usersInfo')['users']]
 if 'root' not in existing:
@@ -269,10 +359,13 @@ admin_pass = os.environ['ADMIN_PASS']
 db_name    = os.environ['DB_NAME']
 db_user    = os.environ['DB_USER']
 db_pass    = os.environ['DB_PASS']
+tlskw = {}
+if os.environ.get('MONGO_TLS_ENABLED') == 'true':
+    tlskw = dict(tls=True, tlsCAFile=os.environ.get('MONGO_TLS_CA_FILE'))
 c = pymongo.MongoClient('mongodb://127.0.0.1:27017',
     username='root', password=admin_pass, authSource='admin',
     authMechanism='SCRAM-SHA-256',
-    serverSelectionTimeoutMS=5000, directConnection=True)
+    serverSelectionTimeoutMS=5000, directConnection=True, **tlskw)
 existing = [u['user'] for u in c[db_name].command('usersInfo')['users']]
 if db_user not in existing:
     c[db_name].command('createUser', db_user,
@@ -305,6 +398,7 @@ storage:
 net:
   port: 27017
   bindIp: 0.0.0.0
+${TLS_NET_LINES}
 
 processManagement:
   timeZoneInfo: /usr/share/zoneinfo
@@ -316,6 +410,7 @@ ${ENC_SEC_LINES}
 
 setParameter:
   diagnosticDataCollectionEnabled: false
+${TLS_SETPARAM_LINE}
 EOF
 
 # ── 6b. COMPLIANCE Phase 2 — encryption at rest ─────────────────
@@ -399,7 +494,7 @@ EOF
   fi
 fi
 
-echo "[mongo-first-boot] Starting mongod with auth + keyFile$([ "${MONGO_RS_ENABLED:-false}" = "true" ] && echo " + replication" || echo "")$([ "${MONGO_COMPLIANCE_ENCRYPTION}" = "true" ] && echo " + encryption" || echo "")$([ "${MONGO_COMPLIANCE_AUDIT}" = "true" ] && echo " + audit" || echo "")..."
+echo "[mongo-first-boot] Starting mongod with auth + keyFile$([ "${MONGO_RS_ENABLED:-false}" = "true" ] && echo " + replication" || echo "")$([ "${MONGO_COMPLIANCE_ENCRYPTION}" = "true" ] && echo " + encryption" || echo "")$([ "${MONGO_COMPLIANCE_AUDIT}" = "true" ] && echo " + audit" || echo "")$([ "${MONGO_TLS_ENABLED}" = "true" ] && echo " + TLS" || echo "")..."
 # Stop the standalone transient unit so the port is free.
 systemctl stop mongod-firstboot-standalone.service 2>/dev/null || true
 sleep 3
@@ -591,6 +686,19 @@ echo "[mongo-first-boot] mongo-primary-probe.service enabled and launch schedule
 if [ -f /etc/mongo-rs-init.env ]; then
   systemctl start --no-block mongo-rs-init.service
   echo "[mongo-first-boot] mongo-rs-init.service started."
+fi
+
+# ── Persist the certificate-rotation credential (TLS only) ─────────
+# mongo-rotate-certs.py needs admin credentials at renewal time (day ~23 of a
+# 30-day cert) — long after /etc/mongo-init-env is shredded below. Persist
+# ADMIN_PASS for the rotation script ONLY when TLS is enabled. Same exposure
+# class as /etc/mongo-probe-pass (root:root 0400); moving credentials to
+# Vault is combined-plan Phase 6.
+if [ "${MONGO_TLS_ENABLED}" = "true" ] && [ -n "${ADMIN_PASS:-}" ]; then
+  (umask 077; printf 'ADMIN_PASS=%s\n' "${ADMIN_PASS}" > /etc/mongo-rotate-env)
+  chown root:root /etc/mongo-rotate-env
+  chmod 400 /etc/mongo-rotate-env
+  echo "[mongo-first-boot] TLS: wrote /etc/mongo-rotate-env for certificate rotation."
 fi
 
 # ── Shred /etc/mongo-init-env after use ─────────

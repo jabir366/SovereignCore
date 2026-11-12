@@ -1,0 +1,27 @@
+[Unit]
+Description=Fetch mongod TLS certificates from tenant Vault PKI (fail-closed)
+#
+# ConditionPathExists keeps this unit a permanent no-op on VMs provisioned
+# WITHOUT Vault TLS (no /etc/mongo-vault/env written by cloud-init) — a
+# skipped condition does not fail dependents (Wants= from
+# mongodb-first-boot.service). On TLS deployments the chart additionally
+# installs a drop-in that strengthens Wants= to Requires=, so a failed
+# fetch blocks first-boot entirely.
+ConditionPathExists=/etc/mongo-vault/env
+After=network-online.target
+Wants=network-online.target
+# Per-boot re-check (renewal fast-path) must complete before mongod starts.
+Before=mongod.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3.12 /usr/local/bin/mongo-vault-fetch-certs.py
+# 540s covers the fetch script's 480s bounded-retry budget.
+# A failure here means: no certificate -> no mongod, never plaintext.
+TimeoutStartSec=540
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

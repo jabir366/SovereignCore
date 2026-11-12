@@ -1,0 +1,36 @@
+[Unit]
+Description=Retry an aborted MongoDB first-boot (until the sentinel exists)
+#
+# WHY THIS UNIT EXISTS: mongodb-first-boot.service is triggered ONLY by the
+# per-instance cloud-init runcmd, which does not re-run on reboot — so an
+# aborted first boot (most commonly: Vault unreachable when the TLS cert
+# fetch ran) could never recover via reboot alone. This unit retries at boot
+# until first-boot completes.
+#
+# Conditions make it a permanent no-op on healthy VMs:
+#   - /etc/mongo-init-env exists      -> a first boot STARTED but never
+#     completed (the file is shredded only on successful completion).
+#   - sentinel /etc/mongodb-first-boot-done ABSENT -> not yet done.
+# On a healthy VM either condition fails and this unit is skipped.
+#
+# Ordering safety: unlike mongodb-first-boot.service, THIS unit is never
+# started from inside cloud-init runcmd, so After=cloud-final.service cannot
+# create the runcmd circular dependency documented in
+# mongodb-first-boot.service's header comment. cloud-final (which runs
+# runcmd) has fully finished by the time this unit starts.
+ConditionPathExists=/etc/mongo-init-env
+ConditionPathExists=!/etc/mongodb-first-boot-done
+After=cloud-final.service network-online.target mongo-vault-certs.service
+Wants=network-online.target mongo-vault-certs.service
+
+[Service]
+Type=oneshot
+# mongo-first-boot.sh is idempotent (sentinel check) and sources its own
+# env files; running it here is equivalent to the runcmd-triggered path.
+ExecStart=/usr/local/bin/mongo-first-boot.sh
+StandardOutput=journal+console
+StandardError=journal+console
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target
