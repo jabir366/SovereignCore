@@ -701,6 +701,18 @@ if [ "${MONGO_TLS_ENABLED}" = "true" ] && [ -n "${ADMIN_PASS:-}" ]; then
   echo "[mongo-first-boot] TLS: wrote /etc/mongo-rotate-env for certificate rotation."
 fi
 
+# ── Persist ADMIN_PASS for the compliance checks (all deployments) ─────────
+# The VM checks (mdb_auth_02, mdb_rbac_01, mdb_rbac_02) read ADMIN_PASS from
+# /etc/mongo-probe-pass-env. Written root:root 0400 — same exposure class as
+# /etc/mongo-probe-pass and /etc/mongo-rotate-env. Not in the cloud-init secret
+# in plaintext form beyond the one write_files entry.
+if [ -n "${ADMIN_PASS:-}" ]; then
+  (umask 077; printf 'ADMIN_PASS=%s\n' "${ADMIN_PASS}" > /etc/mongo-probe-pass-env)
+  chown root:root /etc/mongo-probe-pass-env
+  chmod 400 /etc/mongo-probe-pass-env
+  echo "[mongo-first-boot] wrote /etc/mongo-probe-pass-env for compliance checks."
+fi
+
 # ── Shred /etc/mongo-init-env after use ─────────
 # The file was already written 0600 by cloud-init. Shredding it ensures
 # credentials are not recoverable from disk after first-boot completes.
