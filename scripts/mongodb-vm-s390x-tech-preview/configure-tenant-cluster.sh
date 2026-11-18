@@ -8,9 +8,10 @@
 #      (openshift-config/pull-secret) so nodes can pull OCM/klusterlet images
 #   3. Creates a cluster-wide IDMS (ImageDigestMirrorSet) to redirect all
 #      registry pulls through the internal Quay mirror
-#   4. Creates the CDI-format quay-pull-secret (accessKeyId/secretKey) and
-#      quay-ca-bundle ConfigMap in ALL namespaces (existing + future via
-#      a cluster-scoped ACM Policy) so any product namespace can use them
+#   4. Configures cluster-wide CA trust and OpenShift Virtualization (CDI) settings.
+#      Note: Per-namespace CDI secrets (quay-pull-secret) and CA ConfigMaps (quay-ca-bundle)
+#      are now automatically extracted and provisioned on-demand by the Helm chart's
+#      pre-sync hook (namespace-label-hook.yaml), requiring zero manual namespace preparation.
 #
 # Run this from a bastion that has oc access to the SPOKE cluster.
 #
@@ -86,10 +87,6 @@ if [[ -z "$QUAY_CA_CERT_FILE" ]]; then
   QUAY_CA_CERT_FILE="/tmp/quay-ca-${SAFE_REG_NAME}.crt"
 fi
 
-# Namespaces to seed with CDI pull secret + CA bundle.
-# "ALL" = every existing namespace on the spoke (plus a namespace-scoped loop).
-# Or set a space-separated list: "mongodb-vm kafka-vm postgres-vm"
-SEED_NAMESPACES="ALL"
 
 # Spoke cluster access — set SPOKE_KUBECONFIG, OR both SPOKE_API + SPOKE_TOKEN
 SPOKE_KUBECONFIG="${SPOKE_KUBECONFIG:-}"   # e.g. /root/.kube/spoke.kubeconfig
@@ -251,56 +248,9 @@ rm -f "$TMP_SECRET" "$TMP_MERGED"
 ok "Cluster-wide pull secret updated on spoke"
 
 # ---------------------------------------------------------------------------
-# Step 4 — Create CDI-format quay-pull-secret + quay-ca-bundle in namespaces
-#
-# CDI importer requires an Opaque secret with keys:
-#   accessKeyId — registry username (plain, NOT base64)
-#   secretKey   — registry password (plain, NOT base64)
-# This is DIFFERENT from kubernetes.io/dockerconfigjson format.
-#
-# quay-ca-bundle ConfigMap must have key: ca.crt (PEM-encoded CA cert)
-# CDI uses it to verify TLS when pulling from the internal Quay registry.
-#
-# When SEED_NAMESPACES=ALL, seeds every non-system namespace on the spoke.
+# Step 4 — Configure OpenShift Virtualization (CDI) & Cluster CA Trust
 # ---------------------------------------------------------------------------
-log "Step 4: Creating CDI quay-pull-secret + quay-ca-bundle cluster-wide"
-
-CA_CONTENT=$(cat "${QUAY_CA_CERT_FILE}")
-
-# Build the list of target namespaces
-if [[ "$SEED_NAMESPACES" == "ALL" ]]; then
-  # All namespaces except core system ones
-  NAMESPACE_LIST=$(spoke get namespace \
-    --no-headers -o custom-columns="NAME:.metadata.name" | \
-    grep -vE '^(openshift|kube|default|open-cluster|multicluster|hive|local-cluster|assisted|cert-manager|vault)' || true)
-else
-  NAMESPACE_LIST="$SEED_NAMESPACES"
-fi
-
-SEEDED=0
-for NS in $NAMESPACE_LIST; do
-  # Create CDI pull secret (Opaque: accessKeyId + secretKey)
-  spoke create secret generic quay-pull-secret \
-    --namespace "${NS}" \
-    --from-literal=accessKeyId="${QUAY_USER}" \
-    --from-literal=secretKey="${QUAY_PASSWORD}" \
-    --dry-run=client -o yaml | spoke apply -f - 2>/dev/null && \
-
-  # Create CA bundle ConfigMap
-  spoke create configmap quay-ca-bundle \
-    --namespace "${NS}" \
-    --from-file=ca.crt="${QUAY_CA_CERT_FILE}" \
-    --dry-run=client -o yaml | spoke apply -f - 2>/dev/null && \
-
-  SEEDED=$((SEEDED + 1)) || true
-done
-
-ok "CDI quay-pull-secret + quay-ca-bundle seeded in ${SEEDED} namespaces"
-
-# ---------------------------------------------------------------------------
-# Step 5 — Configure OpenShift Virtualization (CDI) & Cluster CA Trust
-# ---------------------------------------------------------------------------
-log "Step 5: Configuring OpenShift Virtualization (CDI) trust for ${QUAY_REGISTRY}"
+log "Step 4: Configuring OpenShift Virtualization (CDI) trust for ${QUAY_REGISTRY}"
 
 # Patch HyperConverged (HCO) if installed on the spoke
 if spoke get hyperconverged kubevirt-hyperconverged -n openshift-cnv &>/dev/null; then
@@ -319,7 +269,8 @@ if spoke get cdiconfig config &>/dev/null; then
 fi
 
 # Update cluster-wide user-ca-bundle in openshift-config
-log "Step 6: Adding Quay CA to cluster-wide user-ca-bundle and image config"
+log "Step 5: Adding Quay CA to cluster-wide user-ca-bundle and image config"
+CA_CONTENT=$(cat "${QUAY_CA_CERT_FILE}")
 
 # Always replace the CA bundle with only the current hub's CA.
 # Appending is wrong when the spoke was previously connected to a different hub:
@@ -354,13 +305,7 @@ echo "======================================================="
 echo ""
 echo " Quay registry       : ${QUAY_REGISTRY}"
 echo " CA cert             : ${QUAY_CA_CERT_FILE}"
-echo " Namespaces seeded   : ${SEEDED}"
-echo ""
-echo " Resources created per namespace:"
-echo "   - quay-pull-secret  (Opaque: accessKeyId / secretKey — CDI format)"
-echo "   - quay-ca-bundle    (ConfigMap: ca.crt — CDI TLS verification)"
-echo ""
-echo " Cluster-wide:"
+echo " Cluster-wide configuration:"
 echo "   - openshift-config/pull-secret  (dockerconfigjson — node image pulls)"
 echo "   - openshift-config/user-ca-bundle (Quay CA — replaced with current hub CA)"
 echo ""
