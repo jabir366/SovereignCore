@@ -1,0 +1,280 @@
+{
+  "catalog": {
+    "uuid": "78e4d098-975e-4301-bf97-7177a72bf9c4",
+    "metadata": {
+      "title": "MongoDB Catalog",
+      "last-modified": "2026-10-07T12:00:00Z",
+      "version": "1.0.0",
+      "oscal-version": "1.0.4"
+    },
+    "groups": [
+      {
+        "id": "mdb-auth",
+        "title": "Authentication",
+        "controls": [
+          {
+            "id": "mdb-auth-01",
+            "title": "SCRAM-SHA-256 enforced",
+            "parts": [
+              {
+                "id": "mdb-auth-01_smt",
+                "name": "statement",
+                "prose": "Only SCRAM-SHA-256 auth mechanism allowed. No MONGODB-CR or plain auth permitted in mongod.conf."
+              }
+            ]
+          },
+          {
+            "id": "mdb-auth-02",
+            "title": "No anonymous access",
+            "parts": [
+              {
+                "id": "mdb-auth-02_smt",
+                "name": "statement",
+                "prose": "No MongoDB users with empty password. --noauth flag must not be present."
+              }
+            ]
+          },
+          {
+            "id": "mdb-auth-03",
+            "title": "x.509 for replica sets",
+            "parts": [
+              {
+                "id": "mdb-auth-03_smt",
+                "name": "statement",
+                "prose": "Intra-cluster replication uses mutual TLS x.509 certificates."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "mdb-enc",
+        "title": "Encryption",
+        "controls": [
+          {
+            "id": "mdb-enc-01",
+            "title": "TLS 1.2+ on all connections",
+            "parts": [
+              {
+                "id": "mdb-enc-01_smt",
+                "name": "statement",
+                "prose": "net.tls.mode set to requireTLS with minimumTLSVersion TLS1_2 in mongod.conf."
+              }
+            ]
+          },
+          {
+            "id": "mdb-enc-02",
+            "title": "WiredTiger encryption at rest",
+            "parts": [
+              {
+                "id": "mdb-enc-02_smt",
+                "name": "statement",
+                "prose": "security.enableEncryption set to true in mongod.conf for WiredTiger storage engine."
+              }
+            ]
+          },
+          {
+            "id": "mdb-enc-03",
+            "title": "Encryption key rotation less than 365 days",
+            "parts": [
+              {
+                "id": "mdb-enc-03_smt",
+                "name": "statement",
+                "prose": "MongoDB KMIP encryption key age must be under 365 days."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "mdb-aud",
+        "title": "Audit Logging",
+        "controls": [
+          {
+            "id": "mdb-aud-01",
+            "title": "Audit log enabled",
+            "parts": [
+              {
+                "id": "mdb-aud-01_smt",
+                "name": "statement",
+                "prose": "auditLog.destination set to file with JSON format in mongod.conf."
+              }
+            ]
+          },
+          {
+            "id": "mdb-aud-02",
+            "title": "Admin operations logged",
+            "parts": [
+              {
+                "id": "mdb-aud-02_smt",
+                "name": "statement",
+                "prose": "auditAuthorizationSuccess set to true to log all authorization decisions."
+              }
+            ]
+          },
+          {
+            "id": "mdb-aud-03",
+            "title": "Log retention 90 days minimum",
+            "parts": [
+              {
+                "id": "mdb-aud-03_smt",
+                "name": "statement",
+                "prose": "Audit log volume must not be purged within 90 days."
+              }
+            ]
+          },
+          {
+            "id": "mdb-aud-04",
+            "title": "VM lifecycle events logged",
+            "parts": [
+              {
+                "id": "mdb-aud-04_smt",
+                "name": "statement",
+                "prose": "OCP audit log captures VM create, delete, and start events for MongoDB VirtualMachine resources."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "mdb-net",
+        "title": "Network Isolation",
+        "controls": [
+          {
+            "id": "mdb-net-01",
+            "title": "bindIp restricted",
+            "parts": [
+              {
+                "id": "mdb-net-01_smt",
+                "name": "statement",
+                "prose": "net.bindIp in mongod.conf must not be 0.0.0.0 except where KubeVirt NAT requires it; NetworkPolicy is the compensating control."
+              }
+            ]
+          },
+          {
+            "id": "mdb-net-02",
+            "title": "NetworkPolicy blocks external access",
+            "parts": [
+              {
+                "id": "mdb-net-02_smt",
+                "name": "statement",
+                "prose": "Kubernetes NetworkPolicy restricts ingress to port 27017 from same namespace only."
+              }
+            ]
+          },
+          {
+            "id": "mdb-net-03",
+            "title": "No external egress",
+            "parts": [
+              {
+                "id": "mdb-net-03_smt",
+                "name": "statement",
+                "prose": "NetworkPolicy egress is empty - no outbound connections permitted except DNS."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "mdb-rbac",
+        "title": "Access Control",
+        "controls": [
+          {
+            "id": "mdb-rbac-01",
+            "title": "Least-privilege DB roles",
+            "parts": [
+              {
+                "id": "mdb-rbac-01_smt",
+                "name": "statement",
+                "prose": "No application user has root or dbOwner role on all databases."
+              }
+            ]
+          },
+          {
+            "id": "mdb-rbac-02",
+            "title": "No root role in production",
+            "parts": [
+              {
+                "id": "mdb-rbac-02_smt",
+                "name": "statement",
+                "prose": "User audit confirms no root role assigned on the production database."
+              }
+            ]
+          },
+          {
+            "id": "mdb-rbac-03",
+            "title": "OCP ServiceAccount RBAC",
+            "parts": [
+              {
+                "id": "mdb-rbac-03_smt",
+                "name": "statement",
+                "prose": "Dedicated Kubernetes ServiceAccount with minimal Role (get and list only)."
+              }
+            ]
+          },
+          {
+            "id": "mdb-rbac-04",
+            "title": "Operator access audit",
+            "parts": [
+              {
+                "id": "mdb-rbac-04_smt",
+                "name": "statement",
+                "prose": "All mongosh admin sessions are logged with operator identity."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "mdb-virt",
+        "title": "OCP Virt VM and s390x",
+        "controls": [
+          {
+            "id": "mdb-virt-01",
+            "title": "virt-launcher pod non-root",
+            "parts": [
+              {
+                "id": "mdb-virt-01_smt",
+                "name": "statement",
+                "prose": "virt-launcher pod runs as non-root with runAsNonRoot set to true and appropriate securityContext."
+              }
+            ]
+          },
+          {
+            "id": "mdb-virt-02",
+            "title": "VM boot image signed and verified",
+            "parts": [
+              {
+                "id": "mdb-virt-02_smt",
+                "name": "statement",
+                "prose": "MongoDB VM boot disk image is cryptographically signed and signature is verified before deployment."
+              }
+            ]
+          },
+          {
+            "id": "mdb-virt-03",
+            "title": "Guest OS RHEL CIS hardened",
+            "parts": [
+              {
+                "id": "mdb-virt-03_smt",
+                "name": "statement",
+                "prose": "Guest RHEL OS inside MongoDB VM passes CIS Level 1 baseline checks via OpenSCAP."
+              }
+            ]
+          },
+          {
+            "id": "mdb-s390x-01",
+            "title": "CPACF hardware crypto active",
+            "parts": [
+              {
+                "id": "mdb-s390x-01_smt",
+                "name": "statement",
+                "prose": "IBM Z CPACF hardware cryptographic acceleration is active and used by MongoDB TLS and WiredTiger encryption."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

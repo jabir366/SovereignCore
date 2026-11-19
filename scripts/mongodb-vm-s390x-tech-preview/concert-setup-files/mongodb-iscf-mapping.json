@@ -1,0 +1,256 @@
+{
+  "mapping-collection": {
+    "uuid": "246356e0-a571-49d0-8f8d-93e69f18f235",
+    "metadata": {
+      "title": "MongoDB to ISCF Control Mapping",
+      "last-modified": "2026-10-01T12:00:00Z",
+      "version": "1.1.0",
+      "oscal-version": "1.0.4"
+    },
+    "mappings": [
+      {
+        "uuid": "c9f16166-c49d-4328-a8a4-1425df910ac7",
+        "source-resource": { "href": "ISCF", "type": "catalog" },
+        "target-resource": { "href": "MongoDB Catalog", "type": "catalog" },
+        "maps": [
+
+          {
+            "uuid": "39729ebc-39c7-4c29-9be6-225256355bbb",
+            "relationship": "intersects-with",
+            "sources": [
+              { "type": "control", "id-ref": "iscf-ia-01" },
+              { "type": "control", "id-ref": "iscf-ai-04" }
+            ],
+            "targets": [{ "type": "control", "id-ref": "mdb-auth-01" }],
+            "props": [{ "name": "mapping-rationale", "value": "SCRAM-SHA-256 enforcement: SP-Controlled IAM (iscf-ia-01) mandates strong auth; AI Usage Logging (iscf-ai-04) covers auth event traceability. Enforced via Helm ConfigMap.", "ns": "https://ibm.com/concert/ns/oscal" }]
+          },
+
+          {
+            "uuid": "4bfa62db-6c59-4800-a944-44ee54e4d0d9",
+            "relationship": "intersects-with",
+            "sources": [
+              { "type": "control", "id-ref": "iscf-ia-01" },
+              { "type": "control", "id-ref": "iscf-ia-02" }
+            ],
+            "targets": [{ "type": "control", "id-ref": "mdb-auth-02" }],
+            "props": [{ "name": "mapping-rationale", "value": "No anonymous access: SP-Controlled IAM (iscf-ia-01) prohibits unauthenticated sessions; No Standing Vendor Access (iscf-ia-02) ensures no anonymous standing sessions. Verified via Concert API user scan.", "ns": "https://ibm.com/concert/ns/oscal" }]
+          },
+
+          {
+            "uuid": "1c3b20f1-1c5c-48db-902a-669024138642",
+            "relationship": "intersects-with",
+            "sources": [
+              { "type": "control", "id-ref": "iscf-cr-03" },
+              { "type": "control", "id-ref": "iscf-dr-07" }
+            ],
+            "targets": [{ "type": "control", "id-ref": "mdb-auth-03" }],
+            "props": [{ "name": "mapping-rationale", "value": "x.509 replica set auth: Approved Cryptographic Algorithms (iscf-cr-03) governs x.509 cipher use; Mandatory Encryption in Transit (iscf-dr-07) requires TLS for all intra-cluster traffic. Enforced via Compliance Operator TLS cert check.", "ns": "https://ibm.com/concert/ns/oscal" }]
+          },
+
+          {
+            "uuid": "cce75ea1-e425-4b94-977a-25ce3b97144f",
+            "relationship": "intersects-with",
+            "sources": [
+              { "type": "control", "id-ref": "iscf-cr-03" },
+              { "type": "control", "id-ref": "iscf-dr-07" },
+              { "type": "control", "id-ref": "iscf-ai-03" }
+            ],
+            "targets": [{ "type": "control", "id-ref": "mdb-enc-01" }],
+            "props": [{ "name": "mapping-rationale", "value": "TLS 1.2+ on all connections: Approved Cipher Algorithms (iscf-cr-03) defines TLS cipher policy; Mandatory Encryption in Transit (iscf-dr-07) requires TLS; AI/Workload Network Isolation (iscf-ai-03) enforces no unencrypted egress.", "ns": "https://ibm.com/concert/ns/oscal" }]
+          },
+
+          {
+            "uuid": "27886b4a-410d-489a-bc07-ec397a77c7c6",
+            "relationship": "intersects-with",
+            "sources": [
+              { "type": "control", "id-ref": "iscf-cr-01" },
+              { "type": "control", "id-ref": "iscf-dr-06" },
+              { "type": "control", "id-ref": "iscf-ai-03" }
+            ],
+            "targets": [{ "type": "control", "id-ref": "mdb-enc-02" }],
+            "props": [{ "name": "mapping-rationale", "value": "WiredTiger encryption at rest: SP-Controlled Keys (iscf-cr-01) governs KMIP key used by WiredTiger; Mandatory Encryption at Rest (iscf-dr-06) requires storage encryption; AI/Workload Network Isolation (iscf-ai-03) ensures encrypted storage nodes are sovereign.", "ns": "https://ibm.com/concert/ns/oscal" }]
+          },
+
+          {
+            "uuid": "cb7ccb04-121f-4cba-b3cb-017d6f2afc9b",
+            "relationship": "intersects-with",
+            "sources": [
+              { "type": "control", "id-ref": "iscf-cr-04" },
+              { "type": "control", "id-ref": "iscf-op-04" }
+            ],
+            "targets": [{ "type": "control", "id-ref": "mdb-enc-03" }],
+            "props": [{ "name": "mapping-rationale", "value": "Key rotation < 365 days: Cryptographic Config Validation (iscf-cr-04) validates key age against approved rotation period; Sovereign Patch and Vulnerability Management (iscf-op-04) governs key lifecycle remediation timelines. Verified via Concert API and KMIP script.", "ns": "https://ibm.com/concert/ns/oscal" }]
+          },
+
+          {
+            "uuid": "2bc465cf-3650-4e44-b1b8-6cb83b5f51b3",
+            "relationship": "intersects-with",
+            "sources": [
+              { "type": "control", "id-ref": "iscf-ia-04" },
+              { "type": "control", "id-ref": "iscf-gov-03" },
+              { "type": "control", "id-ref": "iscf-dr-10" }
+            ],
+            "targets": [{ "type": "control", "id-ref": "mdb-aud-01" }],
+            "props": [{ "name": "mapping-rationale", "value": "auditLog destination set: Account Lifecycle Monitoring (iscf-ia-04) requires auth event logging; Sovereignty Exception Management (iscf-gov-03) relies on audit trail; Metadata Telemetry Residency (iscf-dr-10) ensures logs stay sovereign.", "ns": "https://ibm.com/concert/ns/oscal" }]
+          },
+
+          {
+            "uuid": "a4af409b-aa4f-4034-9541-7f65abbe647c",
+            "relationship": "intersects-with",
+            "sources": [
+              { "type": "control", "id-ref": "iscf-ia-04" },
+              { "type": "control", "id-ref": "iscf-gov-02" },
+              { "type": "control", "id-ref": "iscf-ai-04" }
+            ],
+            "targets": [{ "type": "control", "id-ref": "mdb-aud-02" }],
+            "props": [{ "name": "mapping-rationale", "value": "Admin operations logged: Account Lifecycle Monitoring (iscf-ia-04) requires all privilege events logged; Sovereignty Risk Acceptance (iscf-gov-02) requires audit evidence; AI Usage Logging (iscf-ai-04) captures all usage decisions.", "ns": "https://ibm.com/concert/ns/oscal" }]
+          },
+
+          {
+            "uuid": "697a368d-e465-4900-91d0-43f63e1e770e",
+            "relationship": "intersects-with",
+            "sources": [
+              { "type": "control", "id-ref": "iscf-gov-01" },
+              { "type": "control", "id-ref": "iscf-mi-01" }
+            ],
+            "targets": [{ "type": "control", "id-ref": "mdb-aud-03" }],
+            "props": [{ "name": "mapping-rationale", "value": "Log retention >= 90 days: Regional Sovereignty Control Ownership (iscf-gov-01) sets retention policy authority; Sovereign Monitoring Stack (iscf-mi-01) enforces sovereign log retention within the approved region. Verified via Compliance Operator log volume and policy check.", "ns": "https://ibm.com/concert/ns/oscal" }]
+          },
+
+          {
+            "uuid": "a43143c3-9985-4f5a-9efd-29159ed5acfd",
+            "relationship": "intersects-with",
+            "sources": [
+              { "type": "control", "id-ref": "iscf-ia-04" },
+              { "type": "control", "id-ref": "iscf-gov-01" }
+            ],
+            "targets": [{ "type": "control", "id-ref": "mdb-aud-04" }],
+            "props": [{ "name": "mapping-rationale", "value": "VM lifecycle events logged: Account Lifecycle Monitoring (iscf-ia-04) covers VM provisioning events; Regional Sovereignty Control Ownership (iscf-gov-01) mandates audit accountability for VM lifecycle.", "ns": "https://ibm.com/concert/ns/oscal" }]
+          },
+
+          {
+            "uuid": "ba441317-21a3-4d1e-8690-05e8dee330a1",
+            "relationship": "intersects-with",
+            "sources": [
+              { "type": "control", "id-ref": "iscf-dr-03" },
+              { "type": "control", "id-ref": "iscf-ai-03" }
+            ],
+            "targets": [{ "type": "control", "id-ref": "mdb-net-01" }],
+            "props": [{ "name": "mapping-rationale", "value": "bindIp restricted: Network Egress Sovereignty (iscf-dr-03) controls outbound exposure; AI/Workload Network Isolation (iscf-ai-03) enforces no uncontrolled external exposure from workloads.", "ns": "https://ibm.com/concert/ns/oscal" }]
+          },
+
+          {
+            "uuid": "ccded2fa-46ff-44b1-92b4-43e22c3c15a8",
+            "relationship": "intersects-with",
+            "sources": [
+              { "type": "control", "id-ref": "iscf-dr-03" },
+              { "type": "control", "id-ref": "iscf-dr-04" },
+              { "type": "control", "id-ref": "iscf-dr-09" }
+            ],
+            "targets": [{ "type": "control", "id-ref": "mdb-net-02" }],
+            "props": [{ "name": "mapping-rationale", "value": "NetworkPolicy blocks external: Network Egress Sovereignty (iscf-dr-03); Inter-Namespace Data Flow Control (iscf-dr-04) restricts lateral movement; Cross-Tenant Exposure Prevention (iscf-dr-09) ensures namespace isolation.", "ns": "https://ibm.com/concert/ns/oscal" }]
+          },
+
+          {
+            "uuid": "e50035b7-1905-49ef-9b76-3e0b98193fd0",
+            "relationship": "intersects-with",
+            "sources": [
+              { "type": "control", "id-ref": "iscf-dr-02" },
+              { "type": "control", "id-ref": "iscf-dr-03" }
+            ],
+            "targets": [{ "type": "control", "id-ref": "mdb-net-03" }],
+            "props": [{ "name": "mapping-rationale", "value": "No external egress: Derived/Temporary Data Residency (iscf-dr-02) prevents derived data leaving sovereign boundary; Network Egress Sovereignty (iscf-dr-03) enforces default-deny egress.", "ns": "https://ibm.com/concert/ns/oscal" }]
+          },
+
+          {
+            "uuid": "9423b659-078a-442a-a958-1beac4347ab6",
+            "relationship": "intersects-with",
+            "sources": [
+              { "type": "control", "id-ref": "iscf-ia-01" },
+              { "type": "control", "id-ref": "iscf-dr-09" }
+            ],
+            "targets": [{ "type": "control", "id-ref": "mdb-rbac-01" }],
+            "props": [{ "name": "mapping-rationale", "value": "Least-privilege DB roles: SP-Controlled IAM (iscf-ia-01) governs role assignment policy; Cross-Tenant Exposure Prevention (iscf-dr-09) requires DB-level isolation between tenants. Verified via Concert API DB user role scan.", "ns": "https://ibm.com/concert/ns/oscal" }]
+          },
+
+          {
+            "uuid": "5a43b434-5f68-458f-b354-cd2141e23561",
+            "relationship": "intersects-with",
+            "sources": [
+              { "type": "control", "id-ref": "iscf-ia-01" },
+              { "type": "control", "id-ref": "iscf-ia-02" }
+            ],
+            "targets": [{ "type": "control", "id-ref": "mdb-rbac-02" }],
+            "props": [{ "name": "mapping-rationale", "value": "No root role in production: SP-Controlled IAM (iscf-ia-01) prohibits over-privileged roles; No Standing Vendor Access (iscf-ia-02) ensures no permanent root-level access. Verified via Concert API role membership scan.", "ns": "https://ibm.com/concert/ns/oscal" }]
+          },
+
+          {
+            "uuid": "ebb779e8-f534-484b-92d9-f739845ebce4",
+            "relationship": "intersects-with",
+            "sources": [
+              { "type": "control", "id-ref": "iscf-ia-01" }
+            ],
+            "targets": [{ "type": "control", "id-ref": "mdb-rbac-03" }],
+            "props": [{ "name": "mapping-rationale", "value": "OCP ServiceAccount RBAC: SP-Controlled IAM (iscf-ia-01) governs ServiceAccount identity and role assignment.", "ns": "https://ibm.com/concert/ns/oscal" }]
+          },
+
+          {
+            "uuid": "bc3f1064-ddf9-4167-82c4-35580577396e",
+            "relationship": "intersects-with",
+            "sources": [
+              { "type": "control", "id-ref": "iscf-ia-01" },
+              { "type": "control", "id-ref": "iscf-ia-03" }
+            ],
+            "targets": [{ "type": "control", "id-ref": "mdb-rbac-04" }],
+            "props": [{ "name": "mapping-rationale", "value": "Operator access audit: SP-Controlled IAM (iscf-ia-01) governs operator identity; Sovereign Break-Glass Access Governance (iscf-ia-03) requires all admin sessions to be time-bound and auditable.", "ns": "https://ibm.com/concert/ns/oscal" }]
+          },
+
+          {
+            "uuid": "afbcb624-9415-47e7-8c4b-6e364d979a59",
+            "relationship": "intersects-with",
+            "sources": [
+              { "type": "control", "id-ref": "iscf-ia-01" },
+              { "type": "control", "id-ref": "iscf-dr-09" }
+            ],
+            "targets": [{ "type": "control", "id-ref": "mdb-virt-01" }],
+            "props": [{ "name": "mapping-rationale", "value": "virt-launcher pod non-root: SP-Controlled IAM (iscf-ia-01) governs pod identity; Cross-Tenant Exposure Prevention (iscf-dr-09) requires process isolation between VM workloads.", "ns": "https://ibm.com/concert/ns/oscal" }]
+          },
+
+          {
+            "uuid": "649c80bb-1b1d-4058-bc4c-e4acba75ffb5",
+            "relationship": "intersects-with",
+            "sources": [
+              { "type": "control", "id-ref": "iscf-sc-02" },
+              { "type": "control", "id-ref": "iscf-cr-03" }
+            ],
+            "targets": [{ "type": "control", "id-ref": "mdb-virt-02" }],
+            "props": [{ "name": "mapping-rationale", "value": "VM boot image signed and verified: Image Signing Enforcement (iscf-sc-02) requires cryptographic signatures on all deployed VM images; Approved Cryptographic Algorithms (iscf-cr-03) governs the signing algorithm. Verified via ArgoCD image signature policy and Concert API.", "ns": "https://ibm.com/concert/ns/oscal" }]
+          },
+
+          {
+            "uuid": "17b62721-1fcd-4441-95e3-b280c6c3bf74",
+            "relationship": "intersects-with",
+            "sources": [
+              { "type": "control", "id-ref": "iscf-dr-03" },
+              { "type": "control", "id-ref": "iscf-sc-04" }
+            ],
+            "targets": [{ "type": "control", "id-ref": "mdb-virt-03" }],
+            "props": [{ "name": "mapping-rationale", "value": "Guest OS RHEL CIS hardened: Network Egress Sovereignty (iscf-dr-03) is enforced by OS-level firewall rules on the guest; Automated Config Baseline Enforcement (iscf-sc-04) continuously validates the CIS Level 1 baseline via Compliance Operator.", "ns": "https://ibm.com/concert/ns/oscal" }]
+          },
+
+          {
+            "uuid": "2cce90cd-4934-4fa7-a9a8-e2b01fdd622e",
+            "relationship": "intersects-with",
+            "sources": [
+              { "type": "control", "id-ref": "iscf-cr-03" },
+              { "type": "control", "id-ref": "iscf-ai-03" }
+            ],
+            "targets": [{ "type": "control", "id-ref": "mdb-s390x-01" }],
+            "props": [{ "name": "mapping-rationale", "value": "CPACF hardware crypto active: Approved Cryptographic Algorithms (iscf-cr-03) requires hardware-accelerated encryption where available on IBM Z; AI/Workload Network Isolation (iscf-ai-03) relies on hardware crypto for sovereign workload encryption.", "ns": "https://ibm.com/concert/ns/oscal" }]
+          }
+
+        ]
+      }
+    ]
+  }
+}
