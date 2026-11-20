@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # =============================================================================
-# setup-hub-spoke-dns.sh
+# setup-spoke-dns.sh
 #
 # Configures Hub-native DNS resolution for an imported spoke cluster in
-# IBM Sovereign Core 
+# IBM Sovereign Core
 # Usage:
-#   ./setup-hub-spoke-dns.sh --domain <HOSTNAME_FQDN> --ip <RESOLVE_IP>
-#   ./setup-hub-spoke-dns.sh --help
+#   ./setup-spoke-dns.sh --domain <HOSTNAME_FQDN> --ip <RESOLVE_IP>
+#   ./setup-spoke-dns.sh --help
 #
 # Example:
-#   ./setup-hub-spoke-dns.sh --domain api.ocpz-cp4d4-std.tt.testing --ip 10.17.100.50
+#   ./setup-spoke-dns.sh --domain api.ocpz-cp4d4-std.tt.testing --ip 10.17.100.50
 #
 # What it does:
 #   1. Derives the zone from HOSTNAME_FQDN (e.g. ocpz-cp4d4-std.tt.testing).
@@ -152,6 +152,22 @@ ZONE_SAFE_NAME=$(echo "$FORWARD_ZONE" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-
 CM_NAME="gori-dns-zone-${ZONE_SAFE_NAME}"
 SERIAL=$(date +%s)
 
+# Take SOA primary NS and contact from this hub's base-zone ConfigMap, so the
+# spoke zone matches whichever hub the script is run against.
+SOA_FIELDS=$(oc get configmap -n "$GORI_DNS_NAMESPACE" -l app=gori-dns,zone-type=base -o json \
+  | python3 -c "
+import sys, json, re
+for cm in json.load(sys.stdin).get('items', []):
+    for content in (cm.get('data') or {}).values():
+        m = re.search(r'\bSOA\s+(\S+)\s+(\S+)', content)
+        if m:
+            print(m.group(1), m.group(2))
+            sys.exit(0)
+sys.exit(1)
+") || { err "Could not read SOA from the base-zone ConfigMap (labels app=gori-dns,zone-type=base) in '${GORI_DNS_NAMESPACE}'"; exit 1; }
+read -r SOA_NS SOA_EMAIL <<<"$SOA_FIELDS"
+info "SOA taken from hub base zone: ns=${SOA_NS} contact=${SOA_EMAIL}"
+
 # Extract record prefix (e.g. 'api' from 'api.cluster.example.com')
 SUB_RECORD=$(echo "$HOSTNAME_FQDN" | sed "s/\.${FORWARD_ZONE}$//")
 [[ "$SUB_RECORD" == "$HOSTNAME_FQDN" ]] && SUB_RECORD="@"
@@ -159,7 +175,7 @@ SUB_RECORD=$(echo "$HOSTNAME_FQDN" | sed "s/\.${FORWARD_ZONE}$//")
 ZONE_FILE_CONTENT="; Zone file for ${FORWARD_ZONE}
 \$TTL 3600    ; default TTL for zone
 \$ORIGIN ${FORWARD_ZONE}. ; base domain-name
-@   IN  SOA  ns.sc-x86.msp.com. hostmaster.sc-x86.msp.com. (
+@   IN  SOA  ${SOA_NS} ${SOA_EMAIL} (
     ${SERIAL} ; serial number
     12h        ; refresh
     15m        ; retry
@@ -167,7 +183,7 @@ ZONE_FILE_CONTENT="; Zone file for ${FORWARD_ZONE}
     2h         ; minimum
     )
 ; Name server RR
-    IN  NS   ns.sc-x86.msp.com.
+    IN  NS   ${SOA_NS}
 ; A Records
 ${SUB_RECORD}         IN  A  ${RESOLVE_IP}
 *.apps      IN  A  ${RESOLVE_IP}
