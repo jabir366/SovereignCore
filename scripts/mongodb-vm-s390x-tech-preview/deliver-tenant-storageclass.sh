@@ -1,75 +1,67 @@
 #!/usr/bin/env bash
 # deliver-tenant-storageclass.sh
 #
-# Run against the HUB. Delivers a tenant's StorageClass (and its two CSI secrets) to ONE extra
-# managed cluster, together with the tenant-isolation admission rule, using ACM policies:
+# Run against the HUB, once per tenant. Makes the tenant's StorageClass (ceph-rbd-<tenant-id>)
+# available on the PLATFORM cluster, so tenant MongoDB VMs can use the tenant's storage pool
+# while running on the shared platform cluster.
 #
-#   1. Placement + PlacementBinding for the tenant's existing "storage-class-<tenant>" policy
-#      (secret values are hub templates, so no keys are copied).
-#   2. The shared policy "tenant-storageclass-isolation" (ValidatingAdmissionPolicy + binding),
-#      created once on the hub and placed on the same cluster. The rule is tenant-agnostic:
-#      in a namespace labelled sovereign.cloud.ibm.com/account-id=<tenant>, a PVC naming a
-#      ceph-rbd-* class must name exactly ceph-rbd-<tenant>. Unlabelled namespaces and other
-#      classes are not restricted.
+# Target: only the ManagedCluster labelled sovereign.cloud.ibm.com/account-id=platform. The script
+# never places anything on any other cluster. If --cluster is omitted it is resolved from that label.
 #
-# Storage architecture on the target spoke cluster (e.g. standard4):
-#   Both pools live on the SAME Ceph cluster (sc-x86).
-#   Standard4 already has ONE connection to it:
-#     - StorageCluster: ocs-ext-sc-platform (external, Ready)
-#     - CephCluster:    ocs-ext-sc-platform-cephcluster (Connected, HEALTH_OK)
-#     - CSI Driver:     rbd.csi.ceph.com Driver
+# Ownership: the tenant's StorageRegistration (spec.ofAccount=<tenant>) is the source of truth. Its
+# Ready StorageDeliveryRequest reports the StorageClass policy (status.policyLevels, level
+# StorageClass). The controller creates that policy and places it on the tenant's own cluster.
+# This script adds a placement so the same policy is also delivered to the platform cluster.
 #
-#   A storage class needs only three things to use that connection:
-#     1. pool name           -> in the StorageClass (ceph-rbd-<tenant>)
-#     2. a Ceph user + key   -> in the 2 CSI secrets (rook-csi-rbd-node-<id>, rook-csi-rbd-provisioner-<id>)
-#     3. clusterID           -> "openshift-storage" = the existing connection
+# Steps (each step is skipped when its objects already exist, so re-runs are safe):
+#   1. Resolve the platform ManagedCluster and check it is Available and bound in the namespace.
+#   2. Wait for the tenant's StorageRegistration, then for its Ready StorageDeliveryRequest.
+#   3. Check the StorageClass in that policy is named ceph-rbd-<tenant-id> (the isolation rule
+#      requires this exact name).
+#   4. Placement + PlacementBinding for that policy on the platform cluster. Applied only if the
+#      placement does not already select the cluster.
+#   5. Shared isolation policy tenant-storageclass-isolation (ValidatingAdmissionPolicy + binding),
+#      created only if it does not exist. It is never overwritten, because it is shared by all
+#      tenants. Its placement on the platform cluster is applied only if missing.
+#   6. Wait until the StorageClass and isolation policies are Compliant on the platform cluster.
 #
-#   So delivering to tenant = 1 StorageClass + 2 Secrets + 1 ValidatingAdmissionPolicy. Nothing else.
+# Preflight warnings (do not stop the run): ODF client policies not Compliant on the platform
+# cluster, and the config-policy-controller addon not healthy (policies cannot be enforced then).
 #
 # Usage:
-#   deliver-tenant-storageclass.sh --tenant <account> --cluster <managedcluster> [OPTIONS]
+#   deliver-tenant-storageclass.sh --tenant-id <account-id> [OPTIONS]
+#   deliver-tenant-storageclass.sh --tenant-id <account-id> --remove [OPTIONS]
 #
 # Options:
-#   --tenant, --tenant-id <account>   Account/Tenant ID (StorageDeliveryRequest .spec.toAccount),
-#                                     e.g. platform or bd301ac3-f0f6-4c08-9a0c-ba76d785604d
-#   --tenant-name <name>              Optional tenant display/short name
-#   --cluster <managedcluster>        Target ManagedCluster name, e.g. claas-api-ocpz-cp4d4-std-tt-testing
-#   --namespace, -n <ns>              ACM policy namespace on Hub (default: sov-core-storage)
-#   --context <ctx>                   Kubeconfig context to use for oc commands
-#   --no-isolation                    Deliver the storage class only, without the admission policy rule
-#   --wait                            Wait/poll until policies become Compliant on target cluster
-#   --timeout <sec>                   Timeout in seconds when --wait is specified (default: 300)
-#   --dry-run                         Preview generated manifests without applying
-#   --remove                          Delete the extra Placement/PlacementBindings for this cluster.
-#                                     The isolation placement is removed only when no other extra
-#                                     class remains on that cluster.
-#   -h, --help                        Show this help and exit
+#   --tenant, --tenant-id <id>  Tenant/Account ID (required), e.g. bd301ac3-f0f6-4c08-9a0c-ba76d785604d
+#   --cluster <managedcluster>  Platform ManagedCluster (optional; must carry account-id=platform).
+#                               Default: resolved from the label.
+#   --namespace, -n <ns>        ACM policy namespace on hub (default: sov-core-storage)
+#   --context <ctx>             Kubeconfig context to use for oc commands
+#   --no-isolation              Deliver the StorageClass only, without the isolation policy
+#   --timeout <sec>             Max wait for each object to appear or become Compliant (default: 900)
+#   --dry-run                   Show what would be applied; apply nothing and do not wait
+#   --remove                    Remove this tenant's StorageClass placement from the platform
+#                               cluster. Isolation placement is removed only when no other tenant
+#                               StorageClass remains there. The isolation policy itself is kept.
+#   -h, --help                  Show this help and exit
 #
 # Examples:
-#   # Deliver storage class for tenant to platform cluster
-#   ./deliver-tenant-storageclass.sh \
-#       --tenant bd301ac3-f0f6-4c08-9a0c-ba76d785604d \
-#       --cluster claas-api-ocpz-cp4d4-std-tt-testing \
-#       --wait
-#
-#   # Remove extra placement for tenant from cluster
-#   ./deliver-tenant-storageclass.sh \
-#       --tenant bd301ac3-f0f6-4c08-9a0c-ba76d785604d \
-#       --cluster claas-api-ocpz-cp4d4-std-tt-testing \
-#       --remove
+#   ./deliver-tenant-storageclass.sh --tenant-id bd301ac3-f0f6-4c08-9a0c-ba76d785604d
+#   ./deliver-tenant-storageclass.sh --tenant-id bd301ac3-f0f6-4c08-9a0c-ba76d785604d --dry-run
 set -euo pipefail
 
 NS="sov-core-storage"
 ISO_POLICY="tenant-storageclass-isolation"
+PLATFORM_ACCOUNT="platform"
 TENANT=""
-TENANT_NAME=""
 CLUSTER=""
 CTX=""
 DRY=0
-WAIT=0
 REMOVE=0
 ISOLATION=1
-TIMEOUT=300
+TIMEOUT=900
+POLL=10
 
 usage() {
   sed -n '/^# Usage:/,/^# Examples:/p' "$0" | sed 's/^# \{0,2\}//'
@@ -79,21 +71,19 @@ usage() {
 while [ $# -gt 0 ]; do
   case "$1" in
     --tenant|--tenant-id) TENANT="$2"; shift 2 ;;
-    --tenant-name)        TENANT_NAME="$2"; shift 2 ;;
     --cluster)            CLUSTER="$2"; shift 2 ;;
     --namespace|-n)       NS="$2"; shift 2 ;;
     --context)            CTX="$2"; shift 2 ;;
     --no-isolation)       ISOLATION=0; shift ;;
-    --dry-run)            DRY=1; shift ;;
-    --wait)               WAIT=1; shift ;;
     --timeout)            TIMEOUT="$2"; shift 2 ;;
+    --dry-run)            DRY=1; shift ;;
     --remove)             REMOVE=1; shift ;;
     -h|--help)            usage ;;
     *) echo "Unknown argument: $1" >&2; usage ;;
   esac
 done
 
-[ -n "$TENANT" ] && [ -n "$CLUSTER" ] || { echo "ERROR: --tenant and --cluster are required" >&2; exit 2; }
+[ -n "$TENANT" ] || { echo "ERROR: --tenant-id is required" >&2; exit 2; }
 
 oc_() {
   if [ -n "$CTX" ]; then
@@ -108,100 +98,165 @@ die() {
   exit 1
 }
 
-# ---------------------------------------------------------------------------
-# [1] Look up the tenant's StorageDeliveryRequest on the hub
-# ---------------------------------------------------------------------------
-echo "==> [1/4] Looking up StorageDeliveryRequest for tenant '${TENANT}' in '${NS}'..."
+step() { echo; echo "==> $*"; }
 
-SDR_JSON=$(oc_ -n "$NS" get storagedeliveryrequest -o json 2>/dev/null || true)
-POLICY=""
-
-if [ -n "$SDR_JSON" ]; then
-  POLICY=$(printf '%s' "$SDR_JSON" | python3 -c '
-import sys, json
-t = sys.argv[1]
-for i in json.load(sys.stdin).get("items", []):
-    if i.get("spec", {}).get("toAccount") == t or i.get("metadata", {}).get("name") == t:
-        for l in i.get("status", {}).get("policyLevels", []):
-            if l.get("level") == "StorageClass":
-                print(l.get("policyName", ""))
-                sys.exit(0)
-' "$TENANT")
-fi
-
-# Fallback: if not found via SDR status, check if policy storage-class-<tenant> exists directly
-if [ -z "$POLICY" ]; then
-  if oc_ -n "$NS" get policy "storage-class-${TENANT}" >/dev/null 2>&1; then
-    POLICY="storage-class-${TENANT}"
+# Wait until the command succeeds. Usage: wait_for "<description>" <command> [args...]
+wait_for() {
+  local desc="$1"; shift
+  local waited=0
+  if [ "$DRY" = 1 ]; then
+    "$@" && return 0
+    echo "  [dry-run] would wait for $desc"
+    return 0
   fi
+  until "$@"; do
+    [ "$waited" -lt "$TIMEOUT" ] || die "timed out after ${TIMEOUT}s waiting for $desc"
+    echo "  waiting for $desc (${waited}s)"
+    sleep "$POLL"
+    waited=$((waited + POLL))
+  done
+  echo "  ready: $desc"
+}
+
+apply_manifest() { # $1 description, $2 manifest
+  if [ "$DRY" = 1 ]; then
+    echo "  [dry-run] would apply $1:"
+    printf '%s\n' "$2" | sed 's/^/    /'
+  else
+    printf '%s\n' "$2" | oc_ apply -f - >/dev/null
+    echo "  applied $1"
+  fi
+}
+
+DNS_RE='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+printf '%s' "$TENANT" | grep -Eq "$DNS_RE" || die "--tenant-id must be lowercase alphanumerics and '-'"
+
+# ---------------------------------------------------------------------------
+# Platform cluster: only the ManagedCluster labelled account-id=platform
+# ---------------------------------------------------------------------------
+step "1. Resolving platform ManagedCluster"
+
+PLATFORM_CLUSTERS=$(oc_ get managedcluster -l "sovereign.cloud.ibm.com/account-id=${PLATFORM_ACCOUNT}" \
+  -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
+
+if [ -z "$CLUSTER" ]; then
+  [ -n "$PLATFORM_CLUSTERS" ] || die "no ManagedCluster labelled sovereign.cloud.ibm.com/account-id=${PLATFORM_ACCOUNT}"
+  case "$PLATFORM_CLUSTERS" in
+    *" "*) die "more than one platform ManagedCluster ($PLATFORM_CLUSTERS); pass --cluster" ;;
+  esac
+  CLUSTER="$PLATFORM_CLUSTERS"
 fi
 
-[ -n "$POLICY" ] || die "no StorageDeliveryRequest with a StorageClass policy found for tenant '$TENANT' in namespace '$NS'"
-oc_ -n "$NS" get policy "$POLICY" >/dev/null 2>&1 || die "policy '$POLICY' not found in namespace '$NS'"
+ACCOUNT_LABEL=$(oc_ get managedcluster "$CLUSTER" -o jsonpath='{.metadata.labels.sovereign\.cloud\.ibm\.com/account-id}' 2>/dev/null || true)
+[ -n "$ACCOUNT_LABEL" ] || die "ManagedCluster '$CLUSTER' not found"
+[ "$ACCOUNT_LABEL" = "$PLATFORM_ACCOUNT" ] \
+  || die "ManagedCluster '$CLUSTER' has account-id='$ACCOUNT_LABEL'; this script only targets account-id=${PLATFORM_ACCOUNT}"
 
-echo "Found StorageClass policy: ${POLICY}"
-
-# ---------------------------------------------------------------------------
-# [2] Check the target ManagedCluster
-# ---------------------------------------------------------------------------
-echo "==> [2/4] Checking target ManagedCluster '${CLUSTER}'..."
-oc_ get managedcluster "$CLUSTER" >/dev/null 2>&1 || die "ManagedCluster '$CLUSTER' not found"
+AVAILABLE=$(oc_ get managedcluster "$CLUSTER" -o jsonpath='{.status.conditions[?(@.type=="ManagedClusterConditionAvailable")].status}' 2>/dev/null || true)
+[ "$AVAILABLE" = "True" ] || die "ManagedCluster '$CLUSTER' is not Available (status: ${AVAILABLE:-unknown})"
 
 SET=$(oc_ get managedcluster "$CLUSTER" -o jsonpath='{.metadata.labels.cluster\.open-cluster-management\.io/clusterset}' 2>/dev/null || true)
-[ -n "$SET" ] || die "ManagedCluster '$CLUSTER' has no cluster.open-cluster-management.io/clusterset label"
-
+[ -n "$SET" ] || die "ManagedCluster '$CLUSTER' has no clusterset label"
 oc_ -n "$NS" get managedclustersetbinding "$SET" >/dev/null 2>&1 \
   || die "ManagedClusterSet '$SET' is not bound in '$NS' (cannot place policies there)"
 
-# Placement names must stay short: the placement controller labels "<name>-decision-N" and
-# label values are limited to 63 characters. Use a hash of the cluster name for a fixed length.
-CH=$(printf '%s' "$CLUSTER" | shasum | cut -c1-10)
-PL="${POLICY}-on-${CH}"
-ISO_PL="tsc-isolation-on-${CH}"
+echo "Platform cluster: $CLUSTER (set: $SET)"
 
-# ---------------------------------------------------------------------------
-# Removal path
-# ---------------------------------------------------------------------------
-if [ "$REMOVE" = 1 ]; then
-  echo "Removing extra delivery of $POLICY to $CLUSTER..."
-  if [ "$DRY" = 1 ]; then
-    echo "[DRY-RUN] Would delete placementbinding $PL and placement $PL in $NS"
-  else
-    oc_ -n "$NS" delete placementbinding "$PL" --ignore-not-found
-    oc_ -n "$NS" delete placement "$PL" --ignore-not-found
-  fi
-
-  LEFT=$(oc_ -n "$NS" get placement -l sovereign.cloud.ibm.com/extra-delivery-kind=storageclass -o json 2>/dev/null \
-    | python3 -c '
-import sys, json
-c = sys.argv[1]
-try:
-    items = json.load(sys.stdin).get("items", [])
-    print(sum(1 for i in items
-              if i.get("metadata", {}).get("annotations", {}).get("sovereign.cloud.ibm.com/target-cluster") == c))
-except Exception:
-    print(0)
-' "$CLUSTER")
-
-  if [ "$LEFT" -le 1 ]; then
-    echo "No other extra class on $CLUSTER; removing the isolation placement ($ISO_PL)..."
-    if [ "$DRY" = 1 ]; then
-      echo "[DRY-RUN] Would delete placementbinding $ISO_PL and placement $ISO_PL in $NS"
-    else
-      oc_ -n "$NS" delete placementbinding "$ISO_PL" --ignore-not-found
-      oc_ -n "$NS" delete placement "$ISO_PL" --ignore-not-found
-    fi
-  else
-    echo "$((LEFT - 1)) other extra class(es) still on $CLUSTER; keeping isolation placement ($ISO_PL)."
-  fi
-  echo "Done. Objects already delivered stay on $CLUSTER until deleted there."
-  exit 0
+ADDON=$(oc_ get managedcluster "$CLUSTER" -o jsonpath='{.metadata.labels.feature\.open-cluster-management\.io/addon-config-policy-controller}' 2>/dev/null || true)
+if [ "$ADDON" != "available" ]; then
+  echo "WARNING: config-policy-controller addon is '${ADDON:-unknown}' on $CLUSTER; policies cannot be enforced until it is available" >&2
 fi
 
 # ---------------------------------------------------------------------------
-# Check ODF client side compliance
+# Tenant StorageRegistration -> Ready StorageDeliveryRequest -> StorageClass policy
 # ---------------------------------------------------------------------------
-compliance() { # $1=policy $2=cluster
+find_registration() {
+  oc_ -n "$NS" get storageregistrations.storage.sovereign.cloud.ibm.com -o json 2>/dev/null | python3 -c '
+import sys, json
+t = sys.argv[1]
+for i in json.load(sys.stdin).get("items", []):
+    if i.get("spec", {}).get("ofAccount") == t:
+        print(i["metadata"]["name"])
+        break
+' "$TENANT" || true
+}
+
+find_storage_class_policy() { # $1 registration name
+  oc_ -n "$NS" get storagedeliveryrequests.storage.sovereign.cloud.ibm.com -o json 2>/dev/null | python3 -c '
+import sys, json
+r = sys.argv[1]
+for i in json.load(sys.stdin).get("items", []):
+    if i.get("spec", {}).get("storageRegistrationRef", {}).get("name") != r:
+        continue
+    if i.get("status", {}).get("phase") != "Ready":
+        continue
+    for l in i.get("status", {}).get("policyLevels", []):
+        if l.get("level") == "StorageClass" and l.get("policyName"):
+            print(l["policyName"])
+            sys.exit(0)
+' "$1" || true
+}
+
+step "2. Waiting for the tenant StorageRegistration and its StorageClass policy"
+
+REG=""
+reg_found() { REG=$(find_registration); [ -n "$REG" ]; }
+wait_for "StorageRegistration with ofAccount=$TENANT" reg_found
+[ -n "$REG" ] || die "no StorageRegistration with ofAccount=$TENANT"
+echo "  StorageRegistration: $REG"
+
+SC_POLICY=""
+sc_policy_found() { SC_POLICY=$(find_storage_class_policy "$REG"); [ -n "$SC_POLICY" ]; }
+wait_for "Ready StorageDeliveryRequest with StorageClass policy for $REG" sc_policy_found
+[ -n "$SC_POLICY" ] || die "no Ready StorageDeliveryRequest with a StorageClass policy for $REG"
+echo "  StorageClass policy: $SC_POLICY"
+
+[ "$DRY" = 1 ] || oc_ -n "$NS" get policy "$SC_POLICY" >/dev/null 2>&1 \
+  || die "policy '$SC_POLICY' reported by the SDR does not exist in '$NS'"
+
+# ---------------------------------------------------------------------------
+# Check the StorageClass name required by the isolation rule
+# ---------------------------------------------------------------------------
+step "3. Checking StorageClass name in $SC_POLICY"
+
+EXPECTED_SC="ceph-rbd-${TENANT}"
+if [ "$DRY" = 1 ] && ! oc_ -n "$NS" get policy "$SC_POLICY" >/dev/null 2>&1; then
+  echo "  [dry-run] policy not available to inspect; expected StorageClass: $EXPECTED_SC"
+else
+  SC_NAMES=$(oc_ -n "$NS" get policy "$SC_POLICY" -o json | python3 -c '
+import sys, json
+for t in json.load(sys.stdin)["spec"]["policy-templates"]:
+    for o in t["objectDefinition"]["spec"].get("object-templates", []):
+        od = o.get("objectDefinition", {})
+        if od.get("kind") == "StorageClass":
+            print(od["metadata"]["name"])
+')
+  echo "  StorageClasses in policy: ${SC_NAMES:-none}"
+  printf '%s\n' "$SC_NAMES" | grep -qx "$EXPECTED_SC" \
+    || die "policy $SC_POLICY does not define StorageClass '$EXPECTED_SC' (found: ${SC_NAMES:-none}); the isolation rule would block its PVCs"
+  echo "  OK: StorageClass $EXPECTED_SC"
+fi
+
+# ---------------------------------------------------------------------------
+# Name length: placement controller labels "<name>-decision-N" (max 63 chars)
+# ---------------------------------------------------------------------------
+CH=$(printf '%s' "$CLUSTER" | shasum | cut -c1-10)
+PL="${SC_POLICY}-on-${CH}"
+ISO_PL="tsc-isolation-on-${CH}"
+[ $(( ${#PL} + 9 )) -le 63 ] || die "placement name '$PL' is too long (limit 63 with '-decision-N')"
+
+# ---------------------------------------------------------------------------
+# Helpers for existence and state checks
+# ---------------------------------------------------------------------------
+placement_selects() { # $1 placement name
+  local d
+  d=$(oc_ -n "$NS" get placementdecisions.cluster.open-cluster-management.io \
+      -l "cluster.open-cluster-management.io/placement=$1" \
+      -o jsonpath='{.items[*].status.decisions[*].clusterName}' 2>/dev/null || true)
+  case " $d " in *" $CLUSTER "*) return 0 ;; *) return 1 ;; esac
+}
+
+compliance() { # $1 policy name
   oc_ -n "$NS" get policy "$1" -o json 2>/dev/null | python3 -c '
 import sys, json
 c = sys.argv[1]
@@ -212,27 +267,15 @@ try:
             break
 except Exception:
     pass
-' "$2"
+' "$CLUSTER" || true
 }
 
-ODF=$(compliance install-odf-operator "$CLUSTER")
-if [ -z "$ODF" ]; then
-  ODF=$(compliance install-odf-client "$CLUSTER")
-fi
+is_compliant() { [ "$(compliance "$1")" = "Compliant" ]; }
 
-if [ "$ODF" != "Compliant" ]; then
-  echo "WARNING: ODF operator policy is '${ODF:-not placed}' on $CLUSTER; target cluster requires rbd.csi.ceph.com Driver" >&2
-else
-  echo "ODF client operator is Compliant on $CLUSTER"
-fi
+policy_exists() { oc_ -n "$NS" get policy "$1" >/dev/null 2>&1; }
 
-# ---------------------------------------------------------------------------
-# [3] & [4] Manifest Generation
-# ---------------------------------------------------------------------------
-echo "==> [3/4] Preparing Placement and PlacementBinding manifests..."
-
-placement_yaml() { # $1=name $2=policy $3=kind
-cat <<EOF
+placement_yaml() { # $1 name $2 policy $3 kind
+  cat <<EOF
 apiVersion: cluster.open-cluster-management.io/v1beta1
 kind: Placement
 metadata:
@@ -274,14 +317,14 @@ subjects:
 EOF
 }
 
-# Shared, tenant-agnostic isolation policy (created once on the hub).
+# Shared isolation policy: tenant-agnostic. Applied only when missing; never overwritten.
 isolation_policy_yaml() {
-cat <<'EOF'
+  cat <<EOF
 apiVersion: policy.open-cluster-management.io/v1
 kind: Policy
 metadata:
-  name: tenant-storageclass-isolation
-  namespace: sov-core-storage
+  name: ${ISO_POLICY}
+  namespace: ${NS}
 spec:
   remediationAction: enforce
   disabled: false
@@ -290,7 +333,7 @@ spec:
       apiVersion: policy.open-cluster-management.io/v1
       kind: ConfigurationPolicy
       metadata:
-        name: tenant-storageclass-isolation
+        name: ${ISO_POLICY}
       spec:
         remediationAction: enforce
         severity: high
@@ -300,7 +343,7 @@ spec:
             apiVersion: admissionregistration.k8s.io/v1
             kind: ValidatingAdmissionPolicy
             metadata:
-              name: tenant-storageclass-isolation
+              name: ${ISO_POLICY}
             spec:
               failurePolicy: Fail
               matchConstraints:
@@ -327,64 +370,116 @@ spec:
             apiVersion: admissionregistration.k8s.io/v1
             kind: ValidatingAdmissionPolicyBinding
             metadata:
-              name: tenant-storageclass-isolation
+              name: ${ISO_POLICY}
             spec:
-              policyName: tenant-storageclass-isolation
+              policyName: ${ISO_POLICY}
               validationActions: ["Deny"]
 EOF
 }
 
-MANIFEST=$(placement_yaml "$PL" "$POLICY" storageclass)
-if [ "$ISOLATION" = 1 ]; then
-  MANIFEST="$MANIFEST
----
-$(isolation_policy_yaml)
----
-$(placement_yaml "$ISO_PL" "$ISO_POLICY" isolation)"
-fi
+# ---------------------------------------------------------------------------
+# Removal path
+# ---------------------------------------------------------------------------
+if [ "$REMOVE" = 1 ]; then
+  step "Removing StorageClass delivery of tenant $TENANT from $CLUSTER"
+  REG=$(find_registration)
+  [ -n "$REG" ] || die "no StorageRegistration with ofAccount=$TENANT"
+  SC_POLICY=$(find_storage_class_policy "$REG")
+  [ -n "$SC_POLICY" ] || die "no Ready StorageDeliveryRequest with a StorageClass policy for $REG"
+  PL="${SC_POLICY}-on-${CH}"
 
-echo ""
-echo "Delivery Summary:"
-echo "  Tenant:     $TENANT ${TENANT_NAME:+(name: $TENANT_NAME)}"
-echo "  Policy:     $POLICY (in $NS)"
-[ "$ISOLATION" = 1 ] && echo "  Isolation:  $ISO_POLICY" || echo "  Isolation:  skipped (--no-isolation)"
-echo "  Target:     $CLUSTER (ClusterSet: $SET)"
-echo ""
+  if [ "$DRY" = 1 ]; then
+    echo "  [dry-run] would delete placementbinding and placement $PL in $NS"
+  else
+    oc_ -n "$NS" delete placementbinding "$PL" --ignore-not-found
+    oc_ -n "$NS" delete placement "$PL" --ignore-not-found
+  fi
 
-if [ "$DRY" = 1 ]; then
-  echo "-------------------- MANIFEST PREVIEW (DRY-RUN) --------------------"
-  printf '%s\n' "$MANIFEST"
-  echo "--------------------------------------------------------------------"
+  LEFT=$(oc_ -n "$NS" get placement -l sovereign.cloud.ibm.com/extra-delivery-kind=storageclass -o json 2>/dev/null \
+    | python3 -c '
+import sys, json
+c = sys.argv[1]
+try:
+    items = json.load(sys.stdin).get("items", [])
+    print(sum(1 for i in items
+              if i.get("metadata", {}).get("annotations", {}).get("sovereign.cloud.ibm.com/target-cluster") == c))
+except Exception:
+    print(0)
+' "$CLUSTER")
+
+  if [ "$LEFT" -eq 0 ]; then
+    echo "  no other tenant StorageClass on $CLUSTER; removing isolation placement $ISO_PL (policy $ISO_POLICY is kept)"
+    if [ "$DRY" = 1 ]; then
+      echo "  [dry-run] would delete placementbinding and placement $ISO_PL"
+    else
+      oc_ -n "$NS" delete placementbinding "$ISO_PL" --ignore-not-found
+      oc_ -n "$NS" delete placement "$ISO_PL" --ignore-not-found
+    fi
+  else
+    echo "  $LEFT other tenant StorageClass(es) still on $CLUSTER; keeping isolation placement"
+  fi
+  echo "Done. Objects already delivered stay on $CLUSTER until deleted there."
   exit 0
 fi
 
-echo "==> [4/4] Applying manifests to hub cluster..."
-printf '%s\n' "$MANIFEST" | oc_ apply -f -
-echo "Placement and policy manifests applied successfully."
+# ---------------------------------------------------------------------------
+# Deliver: StorageClass placement (skip if the cluster is already selected)
+# ---------------------------------------------------------------------------
+step "4. StorageClass placement for $SC_POLICY on $CLUSTER"
+
+if placement_selects "$PL"; then
+  echo "  already present: placement $PL selects $CLUSTER (skipped)"
+else
+  apply_manifest "placement $PL" "$(placement_yaml "$PL" "$SC_POLICY" storageclass)"
+  wait_for "placement $PL to select $CLUSTER" placement_selects "$PL"
+fi
 
 # ---------------------------------------------------------------------------
-# Wait / Polling Loop
+# Isolation: policy only if missing, placement only if not selecting the cluster
 # ---------------------------------------------------------------------------
-if [ "$WAIT" = 1 ]; then
-  WANT="$POLICY"
-  [ "$ISOLATION" = 1 ] && WANT="$POLICY $ISO_POLICY"
-  echo ""
-  echo "Waiting for [$WANT] to become Compliant on $CLUSTER (timeout: ${TIMEOUT}s)..."
-  ELAPSED=0
-  POLL_INTERVAL=10
-  while [ $ELAPSED -lt $TIMEOUT ]; do
-    ALL=1
-    for p in $WANT; do
-      S=$(compliance "$p" "$CLUSTER")
-      echo "  [$ELAPSED s] $p: ${S:-pending}"
-      [ "$S" = "Compliant" ] || ALL=0
-    done
-    if [ "$ALL" = 1 ]; then
-      echo "All policies are Compliant on $CLUSTER!"
-      exit 0
-    fi
-    sleep $POLL_INTERVAL
-    ELAPSED=$((ELAPSED + POLL_INTERVAL))
-  done
-  die "timed out after ${TIMEOUT}s; check status with: oc -n $CLUSTER get policy ${NS}.<policy> -o yaml"
+if [ "$ISOLATION" = 1 ]; then
+  step "5. Isolation policy $ISO_POLICY on $CLUSTER"
+
+  if policy_exists "$ISO_POLICY"; then
+    echo "  already present: $ISO_POLICY (shared, not modified)"
+  else
+    apply_manifest "policy $ISO_POLICY" "$(isolation_policy_yaml)"
+  fi
+
+  if placement_selects "$ISO_PL"; then
+    echo "  already present: placement $ISO_PL selects $CLUSTER (skipped)"
+  else
+    apply_manifest "placement $ISO_PL" "$(placement_yaml "$ISO_PL" "$ISO_POLICY" isolation)"
+    wait_for "placement $ISO_PL to select $CLUSTER" placement_selects "$ISO_PL"
+  fi
+else
+  step "5. Isolation skipped (--no-isolation)"
 fi
+
+# ---------------------------------------------------------------------------
+# Compliance on the platform cluster
+# ---------------------------------------------------------------------------
+step "6. Waiting for compliance on $CLUSTER"
+
+WANT="$SC_POLICY"
+[ "$ISOLATION" = 1 ] && WANT="$SC_POLICY $ISO_POLICY"
+for p in $WANT; do
+  if [ "$DRY" = 1 ]; then
+    echo "  [dry-run] would wait for $p to be Compliant on $CLUSTER"
+  else
+    wait_for "$p Compliant on $CLUSTER" is_compliant "$p"
+  fi
+done
+
+# ODF health is reported, not enforced here: the StorageClass needs these on the platform cluster.
+for p in install-odf-operator cluster-ext-odf-platform; do
+  S=$(compliance "$p")
+  if [ "$S" != "Compliant" ]; then
+    echo "WARNING: $p is '${S:-not placed}' on $CLUSTER; the platform cluster may not reach the Ceph pool" >&2
+  fi
+done
+
+echo
+echo "Delivered: StorageClass ceph-rbd-${TENANT} (policy $SC_POLICY) to $CLUSTER"
+[ "$ISOLATION" = 1 ] && echo "Isolation: $ISO_POLICY enforced on $CLUSTER"
+exit 0
