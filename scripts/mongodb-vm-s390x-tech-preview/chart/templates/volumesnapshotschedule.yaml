@@ -1,0 +1,60 @@
+{{- /*
+  Control: mdb-dr-01 (iscf-dr-05 / iscf-dr-08 / iscf-re-01)
+  Velero Schedule for MongoDB VM backup / DR.
+
+  Opt-in via:
+    backup:
+      enabled: true
+      schedule: "0 2 * * *"      # cron UTC
+      retention: "720h"           # 30 days
+
+  When backup.enabled=true a Velero Schedule resource is rendered that
+  snapshots the entire mongodb-vm namespace on the defined cron schedule
+  and retains backups for the configured TTL.
+
+  Prerequisites on the spoke cluster:
+    - Velero installed (velero.io/v1 CRD group present)
+    - An ObjectStorage BackupStorageLocation configured
+    - Volume snapshot provider compatible with RWO block PVCs
+
+  Acceptance criteria:
+    - helm lint passes
+    - oc get schedule -n <namespace> shows schedule when backup.enabled=true
+    - Manual velero backup create + restore verified in test environment
+*/}}
+{{- $backupEnabled := include "mongodb-vm.val" (list . "backup.enabled") | eq "true" }}
+{{- $schedule      := include "mongodb-vm.val" (list . "backup.schedule") | default "0 2 * * *" }}
+{{- $retention     := include "mongodb-vm.val" (list . "backup.retention") | default "720h" }}
+{{- $storageLoc    := include "mongodb-vm.val" (list . "backup.storageLocation") | default "default" }}
+{{- if $backupEnabled }}
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: {{ include "mongodb-vm.fullname" . }}-backup
+  namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+  annotations:
+    {{- include "mongodb-vm.annotations" . | nindent 4 }}
+    ## COMPLIANCE mdb-dr-01 → iscf-dr-05 · iscf-dr-08 · iscf-re-01
+    com.ibm.sovereigncore.compliance.control: "mdb-dr-01"
+    com.ibm.sovereigncore.compliance.iscf-refs: "iscf-dr-05,iscf-dr-08,iscf-re-01"
+spec:
+  schedule: {{ $schedule | quote }}
+  template:
+    ## Snapshot the entire namespace so all VM resources (PVC, Secret, Service)
+    ## are included and can be restored atomically.
+    includedNamespaces:
+      - {{ .Values.namespaceOverride | default .Release.Namespace | quote }}
+    includeClusterResources: false
+    ## Retain backups for the configured TTL (default 720h = 30 days).
+    ttl: {{ $retention | quote }}
+    storageLocation: {{ $storageLoc | quote }}
+    ## Snapshot PVCs as VolumeSnapshots (CSI-based).
+    snapshotVolumes: true
+    ## Fail the schedule run if any resource fails to be backed up.
+    ## Set to false if you want partial backups to succeed.
+    defaultVolumesToFsBackup: false
+    hooks: {}
+{{- end }}

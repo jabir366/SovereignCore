@@ -1,0 +1,224 @@
+{{- /*
+  networkpolicy.yaml — COMPLIANCE Phase 1
+
+  ── Controls implemented ────────────────────────────────────────────────────
+  mdb-net-02 → iscf-dr-03 · iscf-dr-04 · iscf-dr-09
+    Ingress restricted to port 27017 from pods in the same namespace only.
+    Satisfies: "NetworkPolicy blocks external access to MongoDB port".
+
+  mdb-net-04 → iscf-dr-02 · iscf-dr-03
+    Egress is default-deny: only DNS, HTTPS 443 / internal registry :5000 (CDI
+    image import) and TCP 27017 to this release's own member pods (RS peers)
+    are allowed.
+    Satisfies: "No external egress from MongoDB VMs".
+
+  mdb-auth-01 (partial) → iscf-ia-01
+    Network-layer enforcement complements mongod.conf authorization: enabled.
+    Even if mongod auth were misconfigured, external pods cannot reach port 27017.
+
+  ── Render conditions ────────────────────────────────────────────────────────
+  Only rendered when networkPolicy.enabled=true (default: true).
+  Opt-out: set networkPolicy.enabled=false if the cluster manages
+           NetworkPolicies externally (e.g. via ACM hub policies).
+
+  ── Selector ────────────────────────────────────────────────────────────────
+  Selects all MongoDB VM pods by app.kubernetes.io/instance label.
+  Covers both standalone and HA (all replica-set member virt-launcher pods).
+
+  ── Controls NOT covered here (external tooling required) ────────────────────
+  mdb-virt-01  virt-launcher non-root     → OCP Virt platform default
+
+  ── Phase 3 note ─────────────────────────────────────────────────────────────
+  When TLS is implemented (Phase 3, mdb-enc-01), the NetworkPolicy will remain
+  unchanged — TLS operates at the application layer above the network policy.
+*/ -}}
+{{- if include "mongodb-vm.val" (list . "networkPolicy.enabled") | eq "true" }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mongodb-vm.fullname" . }}-restrict
+  namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+    ## COMPLIANCE Phase 1 — mdb-net-02 + mdb-net-04 (iscf-dr-02/03/04/09)
+  annotations:
+    {{- include "mongodb-vm.annotations" . | nindent 4 }}
+    compliance.sovcore.ibm.com/controls: "mdb-net-02,mdb-net-04"
+    compliance.sovcore.ibm.com/iscf: "iscf-dr-02,iscf-dr-03,iscf-dr-04,iscf-dr-09"
+    compliance.sovcore.ibm.com/phase: "1"
+spec:
+  podSelector:
+    matchLabels:
+      ## Targets all MongoDB VM pods (standalone + all HA members)
+      app.kubernetes.io/instance: {{ include "mongodb-vm.fullname" . }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    ## mdb-net-02: allow only same-namespace pods on port 27017
+    - from:
+        - podSelector: {}   ## any pod in the same namespace
+      ports:
+        - port: {{ .Values.service.port }}
+          protocol: TCP
+    ## SSH (port 22), in-namespace only. Two sources:
+    ##   - the compliance checks Job (app.kubernetes.io/component=compliance-checks)
+    ##   - the node network, where virt-handler terminates `virtctl ssh`
+    ##     port-forwards for end users. Source IP not yet verified on the cluster.
+    ## Nothing outside the cluster can reach port 22.
+    {{- if include "mongodb-vm.val" (list . "ssh.enabled") | eq "true" }}
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: compliance-checks
+        - ipBlock:
+            cidr: {{ include "mongodb-vm.val" (list . "ssh.nodeCidr") | default "192.168.150.0/24" | quote }}
+      ports:
+        - port: 22
+          protocol: TCP
+    {{- end }}
+    ## Readiness probe — virt-launcher compute container hits :8080/health
+    ## to determine if this VM is the RS primary. Must be allowed from same
+    ## namespace so KubeVirt can mark the VMI as Ready.
+    - from:
+        - podSelector: {}   ## any pod in the same namespace (virt-launcher)
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress:
+    ## DNS egress — explicitly scoped to the openshift-dns namespace.
+    ## A port-only rule (no "to:") is insufficient on some CNI implementations
+    ## (OVN-K / SDN on s390x) — the namespaceSelector is required so that
+    ## DNS queries from CDI importer pods (which inherit this policy's labels
+    ## via app.kubernetes.io/instance) actually reach CoreDNS at 172.30.0.10.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-dns
+      ports:
+        - port: 5353
+          protocol: UDP
+        - port: 5353
+          protocol: TCP
+    ## DNS to ClusterIP (172.30.0.10:53) — the Service maps 53→5353 but some
+    ## CNIs require the Service port (53) to be explicitly allowed as well.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    ## HTTPS egress — required for CDI importer pods to pull the container image
+    ## from an external registry (docker://registry-quay-*.apps.*:443).
+    ## Importer pods inherit app.kubernetes.io/instance from the DataVolume and
+    ## therefore match this NetworkPolicy selector. Without port 443 egress the
+    ## importer cannot connect to the registry and fails with
+    ## "Unable to transfer source data to scratch space".
+    - ports:
+        - port: 443
+          protocol: TCP
+    ## OCP internal registry egress — CDI importer pods pull the ContainerDisk
+    ## from the cluster-internal registry at image-registry.openshift-image-registry.svc:5000.
+    ## The OCP internal registry listens on port 5000 (not 443) within the cluster.
+    ## Scoped to openshift-image-registry namespace to satisfy mdb-net-04 least-egress.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-image-registry
+      ports:
+        - port: 5000
+          protocol: TCP
+    {{- if and (include "mongodb-vm.val" (list . "compliance.tls.enabled") | default "false" | eq "true") (include "mongodb-vm.val" (list . "vault.address")) }}
+    ## Vault PKI egress (Phase 3, mdb-enc-01) — the in-guest bootstrap
+    ## (mongo-vault-certs.service) fetches the mongod TLS certificate from
+    ## the tenant Vault at boot, and the daily renewal timer re-issues near
+    ## expiry. Scoped to the Vault namespace and Service port only, so
+    ## mdb-net-04 (least-egress) still holds. CRITICAL: without this rule
+    ## the default-deny egress silently drops the fetch and first-boot
+    ## fails closed (by design — never plaintext). Vault is reached via its
+    ## Service DNS name (vault.<vault.namespace>.svc.cluster.local), so the
+    ## openshift-dns egress rules above already cover name resolution.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ include "mongodb-vm.val" (list . "vault.namespace") | default "vault" }}
+      ports:
+        - port: {{ include "mongodb-vm.val" (list . "vault.port") | default "8200" | int }}
+          protocol: TCP
+    {{- end }}
+    ## Replica-set peer traffic — once policyTypes includes Egress, egress is
+    ## default-deny, so peer-to-peer 27017 needs an explicit egress rule in
+    ## addition to the ingress rule on the receiving pod. Without it the RS
+    ## members cannot reach each other (replSetInitiate / elections fail).
+    ## Scoped to this release's own member pods only (same instance label) and
+    ## to the MongoDB port only — internal traffic, so mdb-net-04
+    ## ("no external egress") still holds.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ include "mongodb-vm.fullname" . }}
+      ports:
+        - port: {{ .Values.service.port }}
+          protocol: TCP
+    ## Readiness probe egress — HA members probe each other on :8080 to track
+    ## which pod is PRIMARY. Without this rule the probe traffic is blocked by
+    ## the default-deny egress policy and the VIP endpoint never updates.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ include "mongodb-vm.fullname" . }}
+      ports:
+        - port: 8080
+          protocol: TCP
+    ## mdb-net-04: all other egress blocked — only DNS + HTTPS + internal registry
+    ## + Vault (TLS deployments, port 8200) + RS peer port + probe port allowed.
+{{- end }}
+{{- if include "mongodb-vm.val" (list . "complianceChecks.enabled") | eq "true" }}
+---
+## Compliance checks runner only. Its own policy, so the VM policy above is
+## unchanged. Egress: DNS, ssh (22) to the VM pods in this namespace, and the
+## API server (6443) for the ConfigMap PATCH. Ingress: none.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mongodb-vm.fullname" . }}-compliance-checks
+  namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: compliance-checks
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: compliance-checks
+  policyTypes:
+    - Ingress
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-dns
+      ports:
+        - port: 5353
+          protocol: UDP
+        - port: 5353
+          protocol: TCP
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ include "mongodb-vm.fullname" . }}
+      ports:
+        - port: 22
+          protocol: TCP
+    - ports:
+        - port: 6443
+          protocol: TCP
+{{- end }}

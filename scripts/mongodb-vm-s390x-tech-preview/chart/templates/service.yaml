@@ -1,0 +1,30 @@
+{{- if .Values.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mongodb-vm.fullname" . }}
+  namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+  annotations:
+    {{- include "mongodb-vm.annotations" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- if include "mongodb-vm.val" (list . "ha.enabled") | eq "true" }}
+    ## In HA mode, select all replica-set members by the shared instance label.
+    ## Clients connecting to this service will be routed to any live member.
+    ## The MongoDB driver handles primary/secondary routing internally.
+    app.kubernetes.io/instance: {{ include "mongodb-vm.fullname" . }}
+    {{- else }}
+    kubevirt.io/domain: {{ include "mongodb-vm.fullname" . }}
+    {{- end }}
+  ports:
+    - name: mongodb
+      port: {{ .Values.service.port }}
+      ## Route to the port mongod listens on (ha.port) rather than duplicating
+      ## service.port — identical at defaults (27017), keeps the client Service
+      ## working if ha.port is changed with a custom image.
+      targetPort: {{ include "mongodb-vm.val" (list . "ha.port") | default "27017" }}
+      protocol: TCP
+{{- end }}

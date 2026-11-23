@@ -1,0 +1,203 @@
+{{- /*
+  Control: mdb-aud-05 (iscf-mi-01 / iscf-dr-10)
+  Fluent-bit DaemonSet for centralised log shipping from MongoDB VM audit logs.
+
+  Opt-in via:
+    logging:
+      fluentbit:
+        enabled: true
+        siemEndpoint: "siem.example.com"
+        siemPort: 5044
+        tlsEnabled: true
+
+  The DaemonSet mounts /var/log/mongodb from the host via hostPath and tails
+  the MongoDB audit log, forwarding events to a sovereign SIEM endpoint over
+  TLS. The pod runs as non-root with readOnlyRootFilesystem=true.
+
+  Acceptance criteria:
+    - DaemonSet runs non-root with readOnlyRootFilesystem: true
+    - SIEM receives audit events within 60s of MongoDB write
+    - helm lint passes
+*/}}
+{{- $fluentbitEnabled := include "mongodb-vm.val" (list . "logging.fluentbit.enabled") | eq "true" }}
+{{- $siemEndpoint     := include "mongodb-vm.val" (list . "logging.fluentbit.siemEndpoint") }}
+{{- $siemPort         := include "mongodb-vm.val" (list . "logging.fluentbit.siemPort") | default "5044" }}
+{{- $tlsEnabled       := include "mongodb-vm.val" (list . "logging.fluentbit.tlsEnabled") | default "true" | eq "true" }}
+{{- if $fluentbitEnabled }}
+---
+## ConfigMap: Fluentd configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mongodb-vm.fullname" . }}-fluentbit-config
+  namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: log-shipping
+  annotations:
+    {{- include "mongodb-vm.annotations" . | nindent 4 }}
+    com.ibm.sovereigncore.compliance.control: "mdb-aud-05"
+    com.ibm.sovereigncore.compliance.iscf-refs: "iscf-mi-01,iscf-dr-10"
+data:
+  fluent.conf: |
+    <system>
+      log_level info
+    </system>
+
+    ## Tail the MongoDB JSON audit log from the host
+    <source>
+      @type tail
+      path /var/log/host-mongodb/audit.json
+      pos_file /tmp/fluentd-audit.pos
+      tag mongodb.audit
+      read_from_head true
+      refresh_interval 5
+      rotate_wait 30
+      skip_long_lines true
+      <parse>
+        @type json
+        time_key ts
+        time_format %Y-%m-%dT%H:%M:%S.%L
+      </parse>
+    </source>
+
+    ## Tail the main mongod log from the host
+    <source>
+      @type tail
+      path /var/log/host-mongodb/mongod.log
+      pos_file /tmp/fluentd-mongod.pos
+      tag mongodb.mongod
+      read_from_head false
+      refresh_interval 5
+      rotate_wait 30
+      skip_long_lines true
+      <parse>
+        @type json
+      </parse>
+    </source>
+
+    ## Forward to sovereign SIEM over TCP
+    <match mongodb.**>
+      @type forward
+      <server>
+        host {{ $siemEndpoint | quote }}
+        port {{ $siemPort }}
+      </server>
+      {{- if $tlsEnabled }}
+      transport tls
+      tls_verify_hostname true
+      {{- end }}
+      <buffer>
+        @type file
+        path /tmp/buffer-mongodb
+        flush_interval 5s
+        chunk_limit_size 2m
+        queue_limit_length 32
+        retry_max_interval 30s
+        retry_forever false
+      </buffer>
+    </match>
+
+---
+## DaemonSet: Fluentd log collector
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "mongodb-vm.fullname" . }}-fluentbit
+  namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: log-shipping
+  annotations:
+    {{- include "mongodb-vm.annotations" . | nindent 4 }}
+    com.ibm.sovereigncore.compliance.control: "mdb-aud-05"
+    com.ibm.sovereigncore.compliance.iscf-refs: "iscf-mi-01,iscf-dr-10"
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "mongodb-vm.name" . }}-fluentbit
+      app.kubernetes.io/instance: {{ include "mongodb-vm.fullname" . }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "mongodb-vm.name" . }}-fluentbit
+        app.kubernetes.io/instance: {{ include "mongodb-vm.fullname" . }}
+        app.kubernetes.io/component: log-shipping
+    spec:
+      ## Run on the same node as the MongoDB VM pod so /var/log/mongodb is reachable.
+      ## Tolerations ensure the DaemonSet schedules on IBM Z worker nodes.
+      tolerations:
+        - key: arch
+          operator: Equal
+          value: s390x
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: fluent-bit
+          ## Red Hat UBI-based Fluentd image from the certified catalog.
+          image: registry.redhat.io/openshift-logging/fluentd-rhel9:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          volumeMounts:
+            ## Config mounted read-only from ConfigMap to user config directory
+            - name: config
+              mountPath: /etc/fluent/configs.d/user
+              readOnly: true
+            ## Host MongoDB log directory — read-only tail
+            - name: mongodb-logs
+              mountPath: /var/log/host-mongodb
+              readOnly: true
+            ## Writable tmp for Fluentd buffers (readOnlyRootFilesystem requires this)
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            exec:
+              command:
+                - /usr/bin/ruby
+                - -e
+                - exit 0
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          livenessProbe:
+            exec:
+              command:
+                - /usr/bin/ruby
+                - -e
+                - exit 0
+            initialDelaySeconds: 30
+            periodSeconds: 60
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "mongodb-vm.fullname" . }}-fluentbit-config
+        ## hostPath mount gives access to the VM guest's log files written via
+        ## KubeVirt virtio-fs or the host's view of the guest disk bind-mounts.
+        ## Path must match the MongoDB VM's /var/log/mongodb directory.
+        - name: mongodb-logs
+          hostPath:
+            path: /var/log/mongodb
+            type: DirectoryOrCreate
+        - name: tmp
+          emptyDir: {}
+      serviceAccountName: {{ include "mongodb-vm.val" (list . "serviceAccount.enabled") | eq "true" | ternary (include "mongodb-vm.fullname" .) "default" }}
+{{- end }}

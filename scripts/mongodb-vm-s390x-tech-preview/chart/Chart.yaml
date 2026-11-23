@@ -1,0 +1,20 @@
+apiVersion: v2
+name: mongodb-vm
+description: MongoDB Enterprise Advanced 8.0 on RHEL 9 s390x deployed as an OCP Virt VirtualMachine. Boot disk produced by securedimage/ (bootc + bootc-image-builder).
+type: application
+version: 1.1.41
+appVersion: "8.0"
+maintainers:
+  - name: IBM SovereignCore
+keywords:
+  - mongodb
+  - enterprise
+  - s390x
+  - ocpvirt
+  - virtualmachine
+  - bootc
+  - securedimage
+annotations:
+  com.ibm.sovereigncore.image-pipeline: "securedimage/build.sh"
+  com.ibm.sovereigncore.image-builder: "registry.redhat.io/rhel9/bootc-image-builder:latest"
+  com.ibm.sovereigncore.image-base: "registry.redhat.io/rhel9/rhel-bootc:9.6"

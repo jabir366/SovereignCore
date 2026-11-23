@@ -1,0 +1,44 @@
+{{- $root := . }}
+{{- if include "mongodb-vm.val" (list . "ha.enabled") | eq "true" }}
+{{- /*
+  HA mode: render one DataVolume per replica set member.
+  Names: <fullname>-0-disk, <fullname>-1-disk, …
+*/ -}}
+{{- range $i := until (include "mongodb-vm.val" (list . "ha.replicaCount") | default "3" | int) }}
+{{- $ctx := dict "Values" $root.Values "Chart" $root.Chart "Release" $root.Release "index" $i }}
+---
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: {{ include "mongodb-vm.memberDvName" $ctx }}
+  namespace: {{ $root.Values.namespaceOverride | default $root.Release.Namespace }}
+  labels:
+    {{- include "mongodb-vm.labels" $root | nindent 4 }}
+    mongodb-vm/member-index: {{ $i | quote }}
+  annotations:
+    {{- include "mongodb-vm.annotations" $root | nindent 4 }}
+    ## CDI importer pod resource override — prevents OOM kills on large bootc image
+    ## layers (300 MB+ compressed). Default CDI limit is 600 Mi which is insufficient
+    ## to decompress layers in-memory, causing "unexpected EOF" failures.
+    cdi.kubevirt.io/storage.pod.resources: '{"limits":{"cpu":"2","memory":"2Gi"},"requests":{"cpu":"500m","memory":"1Gi"}}'
+spec:
+  {{- include "mongodb-vm.dvSpec" $root | nindent 2 }}
+{{- end }}
+{{- else }}
+{{- /*
+  Standalone mode: single DataVolume.
+*/ -}}
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: {{ include "mongodb-vm.dvName" . }}
+  namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+  annotations:
+    {{- include "mongodb-vm.annotations" . | nindent 4 }}
+    ## CDI importer pod resource override — prevents OOM kills on large bootc image layers.
+    cdi.kubevirt.io/storage.pod.resources: '{"limits":{"cpu":"2","memory":"2Gi"},"requests":{"cpu":"500m","memory":"1Gi"}}'
+spec:
+  {{- include "mongodb-vm.dvSpec" . | nindent 2 }}
+{{- end }}

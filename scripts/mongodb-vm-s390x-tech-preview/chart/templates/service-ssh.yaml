@@ -1,0 +1,41 @@
+{{- /*
+  service-ssh.yaml — per-VM ClusterIP Services for SSH (port 22)
+
+  One ClusterIP Service per VM, named <memberName>-ssh, selecting that VM's
+  virt-launcher pod by kubevirt.io/domain. ClusterIP only: nothing listens on
+  the node network, so nothing is reachable from outside the cluster.
+
+  Consumers inside the cluster:
+    - the compliance checks Job (run-checks.sh) — uses the Service name
+    - `virtctl ssh` (virt-api port-forward) — uses the VMI, not the Service
+  Rendered only when ssh.enabled=true.
+*/ -}}
+{{- if include "mongodb-vm.val" (list . "ssh.enabled") | eq "true" }}
+{{- $count := 1 }}
+{{- if include "mongodb-vm.val" (list . "ha.enabled") | eq "true" }}
+{{- $count = include "mongodb-vm.val" (list . "ha.replicaCount") | default "3" | int }}
+{{- end }}
+{{- range $i := until $count }}
+{{- $ctx := dict "Values" $.Values "Chart" $.Chart "Release" $.Release "index" $i }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mongodb-vm.memberName" $ctx }}-ssh
+  namespace: {{ $.Values.namespaceOverride | default $.Release.Namespace }}
+  labels:
+    {{- include "mongodb-vm.labels" $ | nindent 4 }}
+    mongodb-vm/member-index: {{ $i | quote }}
+  annotations:
+    {{- include "mongodb-vm.annotations" $ | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    kubevirt.io/domain: {{ include "mongodb-vm.memberName" $ctx }}
+  ports:
+    - name: ssh
+      port: 22
+      targetPort: 22
+      protocol: TCP
+{{- end }}
+{{- end }}

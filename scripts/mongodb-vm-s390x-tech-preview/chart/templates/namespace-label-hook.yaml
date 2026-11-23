@@ -1,0 +1,323 @@
+{{- /*
+  namespace-label-hook.yaml — COMPLIANCE Phase 1 & CDI Prerequisite Automation
+
+  ── Controls & Capabilities implemented ──────────────────────────────────────
+  1. mdb-gov-01 → iscf-gov-01
+     Applies the sovereignty/control-owner governance label to the release
+     namespace so platform posture reporting (Concert, Compliance Operator)
+     can correctly attribute controls to this workload.
+     Runs BEFORE the VM and its PVCs are created so that the tenant label
+     (sovereign.cloud.ibm.com/account-id) is already present when the spoke
+     admission policy evaluates the PVCs.
+
+  2. Automated CDI Credentials & CA Trust Provisioning
+     Automatically checks if the required CDI Secret (quay-pull-secret) and
+     CA ConfigMap (quay-ca-bundle) exist in the target tenant namespace.
+     If missing, it extracts and provisions them from openshift-config/pull-secret
+     and openshift-config/user-ca-bundle (or openshift-ingress/router-ca), or
+     uses optional inline fallbacks (diskImage.caCert, diskImage.pullSecretData).
+     This guarantees zero-touch, out-of-the-box deployment into new tenant namespaces.
+
+  Control: mdb-gov-01 · ISCF: iscf-gov-01
+
+  ── Render conditions ────────────────────────────────────────────────────────
+  Only rendered when governance.namespaceLabel.enabled=true (default: true).
+
+  ── RBAC requirement ─────────────────────────────────────────────────────────
+  The Job uses a dedicated ServiceAccount (ns-label-sa) with a ClusterRole
+  scoped to patch the target namespace and manage CDI secrets/configmaps.
+  All hook resources are automatically deleted upon hook success.
+*/ -}}
+{{- if .Values.governance.namespaceLabel.enabled }}
+{{- $pullSecret     := index .Values "diskImage.pullSecret"     | default .Values.diskImage.pullSecret | default "quay-pull-secret" }}
+{{- $certConfigMap  := index .Values "diskImage.certConfigMap"  | default .Values.diskImage.certConfigMap | default "quay-ca-bundle" }}
+{{- $caCert         := index .Values "diskImage.caCert"         | default .Values.diskImage.caCert }}
+{{- $pullSecretData := index .Values "diskImage.pullSecretData" | default .Values.diskImage.pullSecretData }}
+{{- $containerDisk  := index .Values "diskImage.sourceContainerDisk" | default .Values.diskImage.sourceContainerDisk }}
+---
+## COMPLIANCE Phase 1 — mdb-gov-01 (iscf-gov-01)
+## Dedicated ServiceAccount for the pre-sync namespace setup hook Job.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "mongodb-vm.fullname" . }}-ns-label-sa
+  namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+  annotations:
+    {{- include "mongodb-vm.annotations" . | nindent 4 }}
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": hook-succeeded,before-hook-creation
+    compliance.sovcore.ibm.com/controls: "mdb-gov-01"
+    compliance.sovcore.ibm.com/iscf: "iscf-gov-01"
+---
+## COMPLIANCE Phase 1 — mdb-gov-01 (iscf-gov-01)
+## ClusterRole: patch namespace labels and manage CDI prerequisites.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "mongodb-vm.fullname" . }}-ns-label
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+  annotations:
+    {{- include "mongodb-vm.annotations" . | nindent 4 }}
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-4"
+    "helm.sh/hook-delete-policy": hook-succeeded,before-hook-creation
+    compliance.sovcore.ibm.com/controls: "mdb-gov-01"
+    compliance.sovcore.ibm.com/iscf: "iscf-gov-01"
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: [{{ .Values.namespaceOverride | default .Release.Namespace | quote }}]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get", "list", "create", "update", "patch"]
+---
+## COMPLIANCE Phase 1 — mdb-gov-01 (iscf-gov-01)
+## ClusterRoleBinding: bind ns-label ClusterRole to the hook SA.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "mongodb-vm.fullname" . }}-ns-label
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+  annotations:
+    {{- include "mongodb-vm.annotations" . | nindent 4 }}
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-3"
+    "helm.sh/hook-delete-policy": hook-succeeded,before-hook-creation
+    compliance.sovcore.ibm.com/controls: "mdb-gov-01"
+    compliance.sovcore.ibm.com/iscf: "iscf-gov-01"
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "mongodb-vm.fullname" . }}-ns-label-sa
+    namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "mongodb-vm.fullname" . }}-ns-label
+  apiGroup: rbac.authorization.k8s.io
+---
+## COMPLIANCE Phase 1 — mdb-gov-01 (iscf-gov-01)
+## Pre-install/upgrade Job: apply namespace governance labels and auto-provision CDI secrets/CAs.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "mongodb-vm.fullname" . }}-ns-label
+  namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+  annotations:
+    {{- include "mongodb-vm.annotations" . | nindent 4 }}
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": hook-succeeded,before-hook-creation
+    compliance.sovcore.ibm.com/controls: "mdb-gov-01"
+    compliance.sovcore.ibm.com/iscf: "iscf-gov-01"
+    compliance.sovcore.ibm.com/phase: "1"
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 120
+  template:
+    metadata:
+      ## Deliberately NOT the instance selector labels: the instance NetworkPolicy
+      ## (egress-restricted) must not apply to this hook pod so it can reach the API server.
+      labels:
+        app.kubernetes.io/name: {{ include "mongodb-vm.name" . }}-ns-label
+        app.kubernetes.io/component: ns-label-hook
+    spec:
+      serviceAccountName: {{ include "mongodb-vm.fullname" . }}-ns-label-sa
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      containers:
+        - name: label-ns
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+
+              # ---------------------------------------------------------------------------
+              # 1. Namespace Governance Labeling (mdb-gov-01 / iscf-gov-01)
+              # ---------------------------------------------------------------------------
+              ACCOUNT_ID={{ .Values.governance.namespaceLabel.tenantId | default (.Values.namespaceOverride | default .Release.Namespace) | quote }}
+              CURRENT=$(oc get namespace "$NAMESPACE" -o jsonpath='{.metadata.labels.sovereign\.cloud\.ibm\.com/account-id}' 2>/dev/null || true)
+              if [ -n "$CURRENT" ] && [ "$CURRENT" != "$ACCOUNT_ID" ]; then
+                echo "mdb-gov-01: namespace $NAMESPACE already belongs to tenant $CURRENT, refusing to relabel it as $ACCOUNT_ID" >&2
+                exit 1
+              fi
+              oc label namespace "$NAMESPACE" \
+                "sovereignty/control-owner={{ .Values.governance.namespaceLabel.controlOwner }}" \
+                "openshift.io/user-monitoring=true" \
+                "sovereign.cloud.ibm.com/account-id=$ACCOUNT_ID" \
+                --overwrite
+              echo "mdb-gov-01: namespace $NAMESPACE labelled sovereignty/control-owner={{ .Values.governance.namespaceLabel.controlOwner }} openshift.io/user-monitoring=true sovereign.cloud.ibm.com/account-id=$ACCOUNT_ID"
+
+              # ---------------------------------------------------------------------------
+              # 2. Automated CDI CA ConfigMap Provisioning ($CERT_CM)
+              # ---------------------------------------------------------------------------
+              if [ -n "$CERT_CM" ]; then
+                if oc get configmap "$CERT_CM" -n "$NAMESPACE" >/dev/null 2>&1; then
+                  echo "CDI CA ConfigMap $CERT_CM already exists in $NAMESPACE"
+                else
+                  echo "CDI CA ConfigMap $CERT_CM missing in $NAMESPACE — discovering CA certificate..."
+                  CA_DATA={{ $caCert | default "" | quote }}
+                  if [ -z "$CA_DATA" ]; then
+                    CA_DATA=$(oc get configmap user-ca-bundle -n openshift-config -o jsonpath='{.data.ca-bundle\.crt}' 2>/dev/null || true)
+                    if [ -z "$CA_DATA" ]; then
+                      CA_DATA=$(oc get configmap user-ca-bundle -n openshift-config -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)
+                    fi
+                  fi
+                  if [ -z "$CA_DATA" ]; then
+                    CA_DATA=$(oc get configmap router-ca -n openshift-ingress -o jsonpath='{.data.tls\.crt}' 2>/dev/null || true)
+                    if [ -z "$CA_DATA" ]; then
+                      CA_DATA=$(oc get configmap router-ca -n openshift-ingress -o jsonpath='{.data.ca-bundle\.crt}' 2>/dev/null || true)
+                    fi
+                  fi
+                  if [ -n "$CA_DATA" ]; then
+                    printf '%s\n' "$CA_DATA" > /tmp/ca.crt
+                    oc create configmap "$CERT_CM" -n "$NAMESPACE" \
+                      --from-file=ca.crt=/tmp/ca.crt \
+                      --dry-run=client -o yaml | oc apply -n "$NAMESPACE" -f -
+                    rm -f /tmp/ca.crt
+                    echo "Provisioned CDI CA ConfigMap $CERT_CM in $NAMESPACE"
+                  else
+                    echo "Notice: Cluster registry CA not found in openshift-config or openshift-ingress"
+                  fi
+                fi
+              fi
+
+              # ---------------------------------------------------------------------------
+              # 3. Automated CDI Pull Secret Provisioning ($PULL_SEC)
+              # ---------------------------------------------------------------------------
+              if [ -n "$PULL_SEC" ]; then
+                if oc get secret "$PULL_SEC" -n "$NAMESPACE" >/dev/null 2>&1; then
+                  echo "CDI pull secret $PULL_SEC already exists in $NAMESPACE"
+                else
+                  echo "CDI pull secret $PULL_SEC missing in $NAMESPACE — discovering registry credentials..."
+                  PULL_DATA={{ $pullSecretData | default "" | quote }}
+                  if [ -z "$PULL_DATA" ]; then
+                    PULL_DATA=$(oc get secret pull-secret -n openshift-config -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null | base64 -d 2>/dev/null || true)
+                  fi
+
+                  if [ -n "$PULL_DATA" ]; then
+                    export PULL_DATA
+                    python3 -c "import textwrap; exec(textwrap.dedent('''
+                      import json, base64, sys, os, subprocess
+
+                      pull_raw = os.environ.get('PULL_DATA', '').strip()
+                      target_img = os.environ.get('CONTAINER_DISK', '').strip()
+                      target_reg = target_img.split('/')[0] if target_img else ''
+                      namespace = os.environ.get('NAMESPACE', '').strip()
+                      secret_name = os.environ.get('PULL_SEC', '').strip()
+
+                      if not pull_raw or not secret_name or not namespace:
+                          sys.exit(0)
+
+                      chosen_user = ''
+                      chosen_pass = ''
+
+                      # Format 1: Plain 'username:password'
+                      if ':' in pull_raw and not pull_raw.startswith('{'):
+                          parts = pull_raw.split(':', 1)
+                          chosen_user, chosen_pass = parts[0], parts[1]
+
+                      # Format 2: JSON structure
+                      elif pull_raw.startswith('{'):
+                          try:
+                              data = json.loads(pull_raw)
+                              if 'accessKeyId' in data and 'secretKey' in data:
+                                  chosen_user = data['accessKeyId']
+                                  chosen_pass = data['secretKey']
+                              else:
+                                  auths = data.get('auths', {})
+                                  chosen_auth = ''
+                                  if target_reg:
+                                      for k, v in auths.items():
+                                          if target_reg in k:
+                                              chosen_auth = v.get('auth', '')
+                                              chosen_user = v.get('username', '')
+                                              chosen_pass = v.get('password', '')
+                                              break
+                                  if not chosen_auth and not chosen_user:
+                                      for k, v in auths.items():
+                                          if 'quay' in k:
+                                              chosen_auth = v.get('auth', '')
+                                              chosen_user = v.get('username', '')
+                                              chosen_pass = v.get('password', '')
+                                              break
+                                  if not chosen_auth and not chosen_user and auths:
+                                      first_k = next(iter(auths))
+                                      v = auths[first_k]
+                                      chosen_auth = v.get('auth', '')
+                                      chosen_user = v.get('username', '')
+                                      chosen_pass = v.get('password', '')
+
+                                  if chosen_auth and (not chosen_user or not chosen_pass):
+                                      try:
+                                          decoded = base64.b64decode(chosen_auth).decode('utf-8')
+                                          if ':' in decoded:
+                                              chosen_user, chosen_pass = decoded.split(':', 1)
+                                      except Exception:
+                                          pass
+                          except Exception as e:
+                              print(f'Error parsing pull secret data: {e}', file=sys.stderr)
+
+                      if chosen_user and chosen_pass:
+                          cmd = [
+                              'oc', 'create', 'secret', 'generic', secret_name,
+                              '-n', namespace,
+                              f'--from-literal=accessKeyId={chosen_user}',
+                              f'--from-literal=secretKey={chosen_pass}',
+                              '--dry-run=client', '-o', 'yaml'
+                          ]
+                          res = subprocess.run(cmd, capture_output=True, text=True)
+                          if res.returncode == 0:
+                              apply_cmd = ['oc', 'apply', '-n', namespace, '-f', '-']
+                              subprocess.run(apply_cmd, input=res.stdout, text=True, check=True)
+                              print(f'Provisioned CDI pull secret {secret_name} in {namespace}')
+                      else:
+                          print(f'Notice: No matching credentials found for {target_reg or \"registry\"}')
+                    '''))"
+                  else
+                    echo "Notice: openshift-config/pull-secret not found or empty"
+                  fi
+                fi
+              fi
+          env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: PULL_SEC
+              value: {{ $pullSecret | quote }}
+            - name: CERT_CM
+              value: {{ $certConfigMap | quote }}
+            - name: CONTAINER_DISK
+              value: {{ $containerDisk | quote }}
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+{{- end }}

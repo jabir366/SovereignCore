@@ -1,0 +1,185 @@
+{{- /*
+  compliance-checks.yaml — in-cluster runner for the 12 VM-level checks
+
+  Renders, in the release namespace:
+    - ConfigMap  <fullname>-checks-script        vm_checks.sh + run-checks.sh
+    - ConfigMap  <fullname>-compliance-results   results; created empty here,
+                                                 filled in by the runner
+    - ServiceAccount + Role + RoleBinding        the runner's only permissions:
+                                                 get/patch/update on the results
+                                                 ConfigMap, by name
+    - CronJob    <fullname>-compliance-checks    runs the checks hourly (default)
+
+  The CronJob runs run-checks.sh against every per-VM Service rendered from
+  ha.replicaCount (or one VM when standalone), so a replica-count change takes
+  effect on the next sync.
+
+  Rendered only when complianceChecks.enabled=true.
+
+  The runner image is pinned here, not in values.yaml, so it cannot be
+  overridden per environment. It must provide bash, ssh, curl and python3.
+  Verified on sc-x86. Do not use :latest.
+*/ -}}
+{{- if and (include "mongodb-vm.val" (list . "complianceChecks.enabled") | eq "true") (include "mongodb-vm.val" (list . "ssh.enabled") | eq "true") }}
+{{- $ns := .Values.namespaceOverride | default .Release.Namespace }}
+{{- $base := include "mongodb-vm.fullname" . }}
+{{- $image := "registry.redhat.io/ansible-automation-platform/ee-minimal-rhel9:2.18.9-3" }}
+{{- $count := 1 }}
+{{- if include "mongodb-vm.val" (list . "ha.enabled") | eq "true" }}
+{{- $count = include "mongodb-vm.val" (list . "ha.replicaCount") | default "3" | int }}
+{{- end }}
+{{- $services := list }}
+{{- range $i := until $count }}
+{{- $ctx := dict "Values" $.Values "Chart" $.Chart "Release" $.Release "index" $i }}
+{{- $services = append $services (printf "%s-ssh" (include "mongodb-vm.memberName" $ctx)) }}
+{{- end }}
+{{- $resultsCm := printf "%s-compliance-results" $base }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-checks-script" $base }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: compliance-checks
+data:
+  vm_checks.sh: |
+{{ .Files.Get "files/vm_checks.sh" | indent 4 }}
+  run-checks.sh: |
+{{ .Files.Get "files/run-checks.sh" | indent 4 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $resultsCm }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: compliance-checks
+  annotations:
+    ## Filled by the runner. Keep Helm/Argo from treating runner-written data as drift.
+    argocd.argoproj.io/compare-options: IgnoreExtraneous
+data: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ printf "%s-compliance-checks" $base }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: compliance-checks
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ printf "%s-compliance-checks" $base }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: compliance-checks
+rules:
+  ## Only the one results ConfigMap, by name. No create (a ConfigMap cannot be
+  ## created by name without granting create on all ConfigMaps) — the runner
+  ## updates the pre-created object instead.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ $resultsCm | quote }}]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ printf "%s-compliance-checks" $base }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: compliance-checks
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ printf "%s-compliance-checks" $base }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ printf "%s-compliance-checks" $base }}
+    namespace: {{ $ns }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ printf "%s-compliance-checks" $base }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: compliance-checks
+spec:
+  schedule: {{ include "mongodb-vm.val" (list . "complianceChecks.schedule") | default "0 * * * *" | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: {{ include "mongodb-vm.val" (list . "complianceChecks.activeDeadlineSeconds") | default "1800" | int }}
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/component: compliance-checks
+            app.kubernetes.io/instance: {{ $base }}
+        spec:
+          serviceAccountName: {{ printf "%s-compliance-checks" $base }}
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: checks
+              image: {{ $image | quote }}
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/bash", "/scripts/run-checks.sh"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                - name: VM_SERVICES
+                  value: {{ join " " $services | quote }}
+                - name: RESULTS_CM
+                  value: {{ $resultsCm | quote }}
+                - name: NAMESPACE
+                  value: {{ $ns | quote }}
+                - name: SSH_KEY
+                  value: /keys/private_key
+                - name: CHECK_SCRIPT
+                  value: /scripts/vm_checks.sh
+                - name: CLUSTER_NAME
+                  value: {{ include "mongodb-vm.val" (list . "instance.clusterName") | default "" | quote }}
+                - name: INSTANCE_NAME
+                  value: {{ include "mongodb-vm.fullname" . | quote }}
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: ssh-key
+                  mountPath: /keys
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}
+            - name: scripts
+              configMap:
+                name: {{ printf "%s-checks-script" $base }}
+                defaultMode: 0555
+            - name: ssh-key
+              secret:
+                secretName: {{ include "mongodb-vm.concertSecretName" . }}
+                defaultMode: 0400
+                items:
+                  - key: private_key
+                    path: private_key
+{{- end }}

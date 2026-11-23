@@ -1,0 +1,151 @@
+{{- /*
+  mdb-rs-01 (iscf-re-01 / iscf-re-03)
+  PrometheusRule for MongoDB Replica Set member health monitoring.
+
+  Opt-in via:
+    monitoring:
+      enabled: true
+
+  Alert fires within 2 minutes of a member entering RECOVERING / STARTUP2
+  state and auto-resolves when all members return to PRIMARY or SECONDARY.
+
+  Prerequisites:
+    - Prometheus Operator (monitoring.coreos.com/v1 CRDs) installed
+    - mongodb-exporter scraping the MongoDB RS metrics endpoint
+      (job label "mongodb-vm" on the scrape target)
+
+  Acceptance criteria:
+    - Alert fires within 2 min of member entering RECOVERING state
+    - Alert resolves when member returns to PRIMARY/SECONDARY
+    - helm lint passes
+*/}}
+{{- $monitoringEnabled := include "mongodb-vm.val" (list . "monitoring.enabled") | eq "true" }}
+{{- $scrapeInterval    := include "mongodb-vm.val" (list . "monitoring.scrapeInterval") | default "30s" }}
+{{- $alertPending      := include "mongodb-vm.val" (list . "monitoring.alertPendingDuration") | default "2m" }}
+{{- $replicaCount      := include "mongodb-vm.val" (list . "ha.replicaCount") | default "3" }}
+{{- $ns                := .Values.namespaceOverride | default .Release.Namespace }}
+{{- if $monitoringEnabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "mongodb-vm.fullname" . }}-rs-health
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: monitoring
+    prometheus: kube-prometheus
+    role: alert-rules
+    openshift.io/user-monitoring: "true"
+  annotations:
+    {{- include "mongodb-vm.annotations" . | nindent 4 }}
+    com.ibm.sovereigncore.compliance.control: "mdb-rs-01"
+    com.ibm.sovereigncore.compliance.iscf-refs: "iscf-re-01,iscf-re-03"
+spec:
+  groups:
+    ## ── mdb-rs-01: RS member health ───────────────────────────────────────────
+    - name: mongodb.rs.health
+      interval: {{ $scrapeInterval | quote }}
+      rules:
+        ## Alert when any RS member reports health == 0 (unhealthy).
+        - alert: MongoDBReplicaSetMemberUnhealthy
+          expr: >-
+            mongodb_rs_members_health{namespace={{ $ns | quote }}} == 0
+            or
+            mongodb_mongod_replset_member_health{namespace={{ $ns | quote }}} == 0
+          for: {{ $alertPending | quote }}
+          labels:
+            severity: critical
+            namespace: {{ $ns | quote }}
+            instance: {{ include "mongodb-vm.fullname" . | quote }}
+          annotations:
+            summary: >-
+              MongoDB RS member {{ "{{" }} $labels.member {{ "}}" }} is unhealthy
+            description: >-
+              Replica set member {{ "{{" }} $labels.member {{ "}}" }} in instance
+              {{ include "mongodb-vm.fullname" . }} has reported health=0 for
+              {{ $alertPending }}.
+              Current state: {{ "{{" }} $labels.state {{ "}}" }}.
+              Investigate with: mongosh --eval "rs.status()"
+
+        ## Alert when the number of voting members in PRIMARY or SECONDARY state
+        ## drops below the expected replica count — catches split-brain scenarios.
+        - alert: MongoDBReplicaSetDegraded
+          expr: >-
+            (
+              count(
+                mongodb_rs_members_state{
+                  namespace={{ $ns | quote }},
+                  state=~"PRIMARY|SECONDARY"
+                } == 1
+                or
+                mongodb_mongod_replset_member_state{
+                  namespace={{ $ns | quote }},
+                  state=~"PRIMARY|SECONDARY"
+                } == 1
+              ) or vector(0)
+            ) < {{ $replicaCount }}
+          for: {{ $alertPending | quote }}
+          labels:
+            severity: warning
+            namespace: {{ $ns | quote }}
+            instance: {{ include "mongodb-vm.fullname" . | quote }}
+          annotations:
+            summary: >-
+              MongoDB RS {{ include "mongodb-vm.fullname" . }} is degraded
+            description: >-
+              Fewer than {{ $replicaCount }} members are in PRIMARY or SECONDARY state in namespace {{ $ns }}.
+              RS may be operating in degraded mode.
+              Investigate with: mongosh --eval "rs.status()"
+
+        ## Alert when no PRIMARY exists in the RS — complete outage scenario.
+        - alert: MongoDBReplicaSetNoPrimary
+          expr: >-
+            (
+              count(
+                mongodb_rs_members_state{
+                  namespace={{ $ns | quote }},
+                  state="PRIMARY"
+                } == 1
+                or
+                mongodb_mongod_replset_member_state{
+                  namespace={{ $ns | quote }},
+                  state="PRIMARY"
+                } == 1
+              ) or vector(0)
+            ) == 0
+          for: 1m
+          labels:
+            severity: critical
+            namespace: {{ $ns | quote }}
+            instance: {{ include "mongodb-vm.fullname" . | quote }}
+          annotations:
+            summary: >-
+              MongoDB RS {{ include "mongodb-vm.fullname" . }} has no PRIMARY
+            description: >-
+              No PRIMARY member found in replica set in namespace {{ $ns }}. All writes are blocked.
+              Investigate with: mongosh --eval "rs.status()"
+
+        ## Alert when fewer than expected VM pods are in Ready state
+        - alert: MongoDBReplicaSetVMsNotReady
+          expr: >-
+            (
+              count(
+                kube_pod_status_ready{
+                  namespace={{ $ns | quote }},
+                  condition="true",
+                  pod=~"virt-launcher-{{ include "mongodb-vm.fullname" . }}-.*"
+                } == 1
+              ) or vector(0)
+            ) < {{ $replicaCount }}
+          for: {{ $alertPending | quote }}
+          labels:
+            severity: warning
+            namespace: {{ $ns | quote }}
+            instance: {{ include "mongodb-vm.fullname" . | quote }}
+          annotations:
+            summary: >-
+              MongoDB RS {{ include "mongodb-vm.fullname" . }} VMs not ready
+            description: >-
+              Fewer than {{ $replicaCount }} MongoDB VM pods are Ready in namespace {{ $ns }}.
+              Investigate with: oc get vms -n {{ $ns }}
+{{- end }}

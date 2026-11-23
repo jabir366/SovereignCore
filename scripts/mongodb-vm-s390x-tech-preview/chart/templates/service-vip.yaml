@@ -1,0 +1,81 @@
+{{- /*
+  service-vip.yaml — primary-only VIP Service for external/local access.
+
+  Only rendered when BOTH conditions are true:
+    ha.enabled=true   — VIP is only meaningful for an RS (needs a primary to track)
+    vip.enabled=true  — opt-in; does not affect ClusterIP service.yaml behaviour
+
+  lb_type controls the Service type:
+    local    → type:NodePort    dev/test, no MetalLB or external IP needed
+    external → type:LoadBalancer  production, MetalLB + IPAddressPool required
+
+  Primary-only routing mechanism:
+    The selector matches ALL RS member pods (same as service.yaml).
+    Only the pod whose readiness probe passes (isWritablePrimary=true) is
+    included in the endpoint set — so the VIP always points at the primary.
+    The readiness probe is injected in virtualmachine.yaml (HA branch only).
+
+  Guard conditions (fail at helm template time, not at apply time):
+    - vip.enabled without ha.enabled → error
+    - lb_type=external without metallbAddressPool → error
+    - lb_type not in {local, external} → error
+*/ -}}
+{{- $vipEnabled  := include "mongodb-vm.val" (list . "vip.enabled") | eq "true" }}
+{{- $haEnabled   := include "mongodb-vm.val" (list . "ha.enabled") | eq "true" }}
+{{- $lbType      := include "mongodb-vm.val" (list . "vip.lb_type")               | default "local" }}
+{{- $mPool       := include "mongodb-vm.val" (list . "vip.metallbAddressPool")     | default "" }}
+{{- $vipPort     := include "mongodb-vm.val" (list . "vip.port")                   | default "27017" }}
+{{- $mongodPort  := include "mongodb-vm.val" (list . "ha.port")                   | default "27017" }}
+{{- $nodePort    := include "mongodb-vm.val" (list . "vip.nodePort")               | default "0" }}
+{{- $extPolicy   := include "mongodb-vm.val" (list . "vip.externalTrafficPolicy")  | default "Local" }}
+{{- if $vipEnabled }}
+
+{{- /* Guard 1: VIP requires HA */ -}}
+{{- if not $haEnabled }}
+{{- fail "vip.enabled=true requires ha.enabled=true — VIP is only meaningful for HA replica sets" }}
+{{- end }}
+
+{{- /* Guard 2: external mode requires metallbAddressPool */ -}}
+{{- if and (eq $lbType "external") (eq $mPool "") }}
+{{- fail "vip.lb_type=external requires vip.metallbAddressPool to be set — specify the MetalLB IPAddressPool name" }}
+{{- end }}
+
+{{- /* Guard 3: lb_type must be one of the two supported values */ -}}
+{{- if and (ne $lbType "local") (ne $lbType "external") }}
+{{- fail "vip.lb_type must be either \"local\" (NodePort) or \"external\" (LoadBalancer)" }}
+{{- end }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mongodb-vm.vipSvcName" . }}
+  namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+  annotations:
+    {{- include "mongodb-vm.annotations" . | nindent 4 }}
+    {{- if and (eq $lbType "external") $mPool }}
+    metallb.io/address-pool: {{ $mPool | quote }}
+    {{- end }}
+spec:
+  ## local → NodePort (dev/test, no external IP)
+  ## external → LoadBalancer (MetalLB allocates IP from vip.metallbAddressPool)
+  type: {{ if eq $lbType "local" }}NodePort{{ else }}LoadBalancer{{ end }}
+  externalTrafficPolicy: {{ $extPolicy }}
+  ## Same selector as service.yaml — all RS member pods.
+  ## The readiness probe on each pod controls which one is in the endpoint set.
+  ## Only the PRIMARY passes the probe → endpoint list is always length-1.
+  selector:
+    app.kubernetes.io/instance: {{ include "mongodb-vm.fullname" . }}
+  ports:
+    - name: mongodb
+      ## vip.port = external port clients connect on; traffic is routed to
+      ## mongod's listen port (ha.port) — identical at defaults (27017).
+      port: {{ $vipPort }}
+      targetPort: {{ $mongodPort }}
+      protocol: TCP
+      {{- if and (eq $lbType "local") (gt (int $nodePort) 0) }}
+      nodePort: {{ $nodePort }}
+      {{- end }}
+{{- end }}

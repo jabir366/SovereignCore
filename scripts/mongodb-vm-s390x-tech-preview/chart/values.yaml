@@ -1,0 +1,645 @@
+# Default values for mongodb-vm chart.
+# Deployed as an OCP Virt VirtualMachine on IBM Z (s390x).
+#
+# ── COMPLIANCE PHASE LEGEND ──────────────────────────────────────────────────
+# This chart implements MongoDB EA compliance controls in three phases.
+# Each values block is annotated with the phase and controls it participates in.
+# Controls verified by external tooling (RHACS / Compliance Operator / Concert)
+# are listed at the bottom of each block as "NOT covered here".
+#
+# Phase 1 — OCP-layer controls (Helm templates only, zero image changes)
+#   networkPolicy.*     → mdb-net-02 (iscf-dr-03/04/09)
+#                          mdb-net-04 (iscf-dr-02/03)
+#   serviceAccount.*    → mdb-rbac-03 (iscf-ia-01)
+#   diskImage.storageClassName = ocs-storagecluster-ceph-rbd-encrypted
+#                       → mdb-enc-05 (iscf-dr-01/05/06)
+#
+# Phase 2 — mongod.conf hardening (cloud-init injected, no image rebuild)
+#   compliance.enableEncryption
+#                       → mdb-enc-02 (iscf-cr-01/dr-06)
+#   compliance.auditLog.*
+#                       → mdb-aud-01 (iscf-ia-04/gov-03/dr-10)
+#                          mdb-aud-02 (iscf-ia-04/gov-02/ai-04)
+#
+# Phase 3 — TLS in-transit (requires cert Secret — NOT YET IMPLEMENTED)
+#   compliance.tls.*    → mdb-enc-01 (iscf-cr-03/dr-07/ai-03)
+#                          mdb-auth-03 (iscf-cr-03/dr-07)
+#
+# VM-level checks run by the in-cluster CronJob (templates/compliance-checks.yaml,
+# files/run-checks.sh, files/vm_checks.sh). Results go to <fullname>-compliance-results:
+#   mdb-auth-01, mdb-auth-02, mdb-enc-02, mdb-enc-03, mdb-aud-01, mdb-aud-02,
+#   mdb-aud-03, mdb-net-01, mdb-rbac-01, mdb-rbac-02, mdb-virt-03, mdb-s390x-01
+#
+# Controls that require external tooling (NOT in this chart):
+#   mdb-enc-06   KMIP key server configured   → cluster-level infra
+#   mdb-rbac-04  VM RBAC approved users only  → Compliance Operator
+#   mdb-virt-01  virt-launcher non-root       → OCP Virt platform default
+#   mdb-virt-02  boot image signed            → RHACS image sig policy
+# ─────────────────────────────────────────────────────────────────────────────
+
+## Common labels applied to all resources
+commonLabels: {}
+
+## Common annotations applied to all resources
+commonAnnotations: {}
+
+## Instance metadata (injected by BYOP broker via values.yaml.tmpl)
+instance:
+  name: ""
+  id: ""
+  environment: ""
+  clusterName: ""
+
+## Image pull secrets (injected by broker if internal registry requires auth)
+imagePullSecrets: []
+
+## SSH is key-only (ssh_pwauth: false). The Concert compliance public key is NOT a user input.
+##
+## concertSSHKeySecret: leave EMPTY (default). The concert-ssh-keygen pre-install hook then creates
+##   a per-instance keypair Secret "<instance>-concert-ssh" (authorized_key + private_key for
+##   Concert to retrieve) and "<instance>-concert-ssh-pub" (public key ONLY). A post-install hook
+##   makes "<instance>-mongodb-creds" their owner, so deleting the instance deletes the keypair.
+##   Every VM references the -pub Secret through KubeVirt accessCredentials, so the key reaches
+##   the guest without Helm `lookup` (disabled under ArgoCD) and without any value in the request.
+##   Setting a name shares ONE keypair across instances and it is then NOT deleted with them.
+concertSSHKeySecret: ""
+
+## Optional extra operator public keys (not required; Concert key is handled above).
+sshAuthorizedKeys: []
+
+## Source disk image — bootc-built RHEL 9 + MongoDB EA 8.0 qcow2 (OCI-native)
+## ─────────────────────────────────────────────────────────────────────────────
+## The boot disk is produced by the securedimage/ build pipeline:
+##   securedimage/build.sh   → podman build + bootc-image-builder → qcow2
+##   securedimage/upload.sh  → virtctl image-upload → PVC  (Path A)
+##                          OR podman push ContainerDisk  (Path B)
+##
+## Path A — PVC (virtctl upload):
+##   sourcePVCName:      mongodb-ea-disk
+##   sourcePVCNamespace: mongodb-vm-images
+##
+## Path B — ContainerDisk (preferred, no CDI upload proxy needed):
+##   sourceContainerDisk: <registry>/byop/mongodb-ea-bootc:8.0-s390x
+##
+## Run securedimage/build.sh on the target s390x build host to produce the image.
+## ─────────────────────────────────────────────────────────────────────────────
+diskImage:
+  ## ContainerDisk image reference in a container registry (highest priority).
+  ## Built by: securedimage/build.sh PUSH_CONTAINERDISK=true REGISTRY=<host>
+  ## CDI pulls the qcow2 from /disk/ inside the container image.
+  ## Set to "" to fall back to sourceURL or sourcePVCName.
+  sourceContainerDisk: ""
+  ## HTTP URL to the qcow2 source image (used by DataVolume sourceHTTP)
+  ## Set to "" to use an existing PVC instead
+  sourceURL: ""
+  ## Name of a pre-existing PVC to clone as the boot disk.
+  ## Produced by: securedimage/upload.sh → PVC mongodb-ea-disk in mongodb-vm-images ns
+  sourcePVCName: ""
+  sourcePVCNamespace: ""
+  ## Secret name in the same namespace containing registry credentials for CDI.
+  ## Must have keys: accessKeyId (username) and secretKey (password).
+  ## Leave empty if the registry is unauthenticated.
+  ## The pre-sync hook automatically extracts credentials from openshift-config/pull-secret
+  ## into this secret if it does not already exist in the target namespace.
+  pullSecret: "quay-pull-secret"
+  ## Optional inline registry credentials (plain "username:password", dockerconfigjson, or JSON).
+  ## If provided, the pre-sync hook creates pullSecret using this data instead of
+  ## extracting from openshift-config/pull-secret.
+  pullSecretData: ""
+  ## ConfigMap name in the same namespace containing the registry CA certificate.
+  ## Must have key: ca.crt  (PEM-encoded CA cert that signed the registry TLS cert).
+  ## CDI uses this to verify the registry TLS connection during image import.
+  ## The pre-sync hook automatically extracts the cluster/registry CA from
+  ## openshift-config/user-ca-bundle or openshift-ingress/router-ca if missing.
+  certConfigMap: "quay-ca-bundle"
+  ## Optional inline PEM-encoded registry CA certificate.
+  ## If provided, the pre-sync hook creates certConfigMap using this certificate.
+  caCert: ""
+  ## Storage class for the VM boot PVC (must support RWO block on s390x).
+  ##
+  ## COMPLIANCE — Phase 1 — mdb-enc-05 → iscf-dr-01 · iscf-dr-05 · iscf-dr-06
+  ##   For encrypted-at-rest compliance use the ODF encrypted storage class:
+  ##     storageClassName: "ocs-storagecluster-ceph-rbd-encrypted"
+  ##   For dev/test environments without encrypted ODF the default below is safe:
+  ##     storageClassName: "ocs-storagecluster-ceph-rbd-virtualization"
+  ##   Driven by broker param: storage_class_name (catalog/schema.json).
+  ##   Default is the non-encrypted class — override per instance via values.yaml.tmpl.
+  storageClassName: "ocs-storagecluster-ceph-rbd-virtualization"
+  ## Boot disk size
+  diskSizeGi: 25
+
+## VirtualMachine resource sizing
+vm:
+  cpuCores: 2
+  memoryGi: 4
+  ## Must use s390-ccw-virtio on IBM Z — do NOT change to q35
+  machineType: s390-ccw-virtio
+
+## MongoDB — database name, usernames, and keyFile only.
+## Passwords are auto-generated by Helm (randAlphaNum 24) on first deploy
+## and stored only in the <name>-mongodb-creds Secret on the spoke cluster.
+## See chart/templates/credentials-secret.yaml.
+mongodb:
+  databaseName: "appdb"
+  databaseUser: "appuser"
+  ## Shared keyFile for RS inter-member authentication.
+  ## Priority: (1) this value if set, (2) Secret <instance.name>-keyfile in namespace,
+  ## (3) auto-generated per Helm render (same for all members in one deployment).
+  ## Leave empty to let the chart manage it automatically.
+  keyFile: ""
+
+## High-Availability (Replica Set) configuration
+## When ha.enabled=true, replicaCount VMs + DataVolumes are created.
+## Each VM joins a MongoDB Replica Set named ha.replicaSetName.
+## Member-0 runs rs.initiate(); all others join via member-0's hostname.
+ha:
+  enabled: false
+  ## Number of replica set members (must be odd: 3 or 5 recommended)
+  replicaCount: 3
+  ## MongoDB replica set name — must match across all members
+  replicaSetName: "rs0"
+  ## Port MongoDB listens on inside each VM (default 27017).
+  ## Also used as targetPort by the client and VIP Services and in the RS
+  ## member list. The standard mongodb-ea-bootc image bakes 27017 into
+  ## mongod.conf — only change this with a custom image built to match.
+  port: 27017
+
+## Namespace where the VM will be deployed
+namespaceOverride: ""
+
+## ── SSH access on port 22 (ClusterIP only, nothing on the node network) ─────
+## Rendered by: templates/service-ssh.yaml (one ClusterIP Service per VM)
+## Ingress allowed by: templates/networkpolicy.yaml
+##   - the compliance checks Job (app.kubernetes.io/component=compliance-checks)
+##   - ssh.nodeCidr, where virt-handler carries `virtctl ssh` port-forwards
+## Users reach a VM with: virtctl ssh -n <ns> cloud-user@vmi/<name>
+ssh:
+  enabled: true
+  ## Node network CIDR that virt-handler uses for port-forwards to the VMs.
+  ## Verify on the cluster before relying on it.
+  nodeCidr: "192.168.150.0/24"
+
+## ── Compliance checks (in-cluster Job, results in a ConfigMap) ───────────────
+## Rendered by: templates/compliance-checks.yaml, runner in files/run-checks.sh.
+## The CronJob runs the 12 VM checks against every VM in the release and writes
+## the results to <fullname>-compliance-results. Concert reads that ConfigMap
+## through the cluster API; it never SSHes to the VMs itself.
+complianceChecks:
+  enabled: true
+  ## Cron schedule (UTC): hourly.
+  schedule: "0 * * * *"
+  ## Hard limit per run (seconds). The Job is killed past this.
+  activeDeadlineSeconds: 1800
+
+## Service to expose MongoDB port within the cluster
+service:
+  enabled: true
+  type: ClusterIP
+  port: 27017
+
+## VIP Service — primary-only external/local access for HA deployments.
+## Only rendered when BOTH ha.enabled=true AND vip.enabled=true.
+## Adds a second Service that routes exclusively to the current RS primary
+## via a readiness probe on db.hello().isWritablePrimary.
+##
+## lb_type controls the Service type and testing strategy:
+##   local    → type:NodePort    dev/test — no MetalLB or external IP needed
+##              access via <any-node-IP>:<vip.nodePort>
+##   external → type:LoadBalancer  production — MetalLB required
+##              access via the IP allocated from vip.metallbAddressPool
+vip:
+  enabled: false
+
+  ## "local" (NodePort) or "external" (LoadBalancer via MetalLB)
+  lb_type: local
+
+  ## External port exposed by the VIP Service. Traffic is routed to mongod's
+  ## listen port (ha.port) — identical at defaults (27017).
+  port: 27017
+
+  ## local mode only — NodePort in range 30000-32767.
+  ## Set to 0 to let OCP auto-assign a port.
+  nodePort: 0
+
+  ## external mode only — MetalLB IPAddressPool name.
+  ## Must match an IPAddressPool resource installed in metallb-system.
+  ## Required when lb_type=external; helm will fail if empty.
+  metallbAddressPool: ""
+
+  ## Avoids double-hop and preserves client source IP.
+  externalTrafficPolicy: Local
+
+  ## Readiness probe tuning — controls how fast a new primary is detected
+  ## after an RS election completes.
+  ## Worst-case failover gap = MongoDB election (~8s)
+  ##   + failureThreshold * periodSeconds (mark old primary down)
+  ##   + successThreshold * periodSeconds (confirm new primary stable)
+  probe:
+    periodSeconds: 5
+    failureThreshold: 2
+    successThreshold: 2
+    timeoutSeconds: 3
+
+## ── COMPLIANCE Phase 1 — NetworkPolicy ──────────────────────────────────────
+## Controls: mdb-net-02 (iscf-dr-03/04/09) · mdb-net-04 (iscf-dr-02/03)
+## Rendered by: chart/templates/networkpolicy.yaml
+##
+## When enabled=true:
+##   Ingress — only pods in the same namespace may reach port 27017.
+##             Satisfies mdb-net-02: "NetworkPolicy blocks external access".
+##   Egress  — default-deny. Only DNS, HTTPS 443 / internal registry :5000
+##             (CDI image import) and TCP 27017 to this release's own member
+##             pods (replica-set peers) are allowed.
+##             Satisfies mdb-net-04: "No external egress from MongoDB VMs".
+##
+## When enabled=false:
+##   No NetworkPolicy is created — the cluster's default network policy applies.
+##   Use false only if the cluster manages NetworkPolicies externally (e.g. ACM).
+##
+## Default: true (opt-out pattern — compliance on by default).
+##
+## mdb-auth-02 and mdb-rbac-01 are checked by the in-cluster compliance CronJob
+## (not by this NetworkPolicy). See the compliance checks section below.
+## ─────────────────────────────────────────────────────────────────────────────
+networkPolicy:
+  enabled: true
+
+## ── COMPLIANCE mdb-net-03 — Kyverno Service-type restriction ─────────────────
+## Control: mdb-net-03 (iscf-dr-03 / iscf-dr-04)
+## Rendered by: chart/templates/kyverno-policy.yaml
+##
+## Default: false — LoadBalancer and NodePort Services are ALLOWED.
+##   Use this default during development, testing, or when MetalLB / external
+##   access is intentionally required (e.g. vip.lb_type=external).
+##
+## When blockExternalServices=true:
+##   A Kyverno namespaced Policy is created that blocks any Service of type
+##   LoadBalancer or NodePort from being applied in the release namespace.
+##   Kyverno must be installed on the cluster (kyverno.io/v1 CRDs present).
+##   Only ClusterIP and ExternalName Services are permitted.
+##   Satisfies mdb-net-03: "No public-facing Service (all Services ClusterIP)".
+##
+## How to enable:
+##   helm upgrade --install <release> ./chart --set network.blockExternalServices=true
+##
+## Prerequisites: Kyverno installed on the cluster.
+## ─────────────────────────────────────────────────────────────────────────────
+network:
+  ## Set true to deploy a Kyverno Policy that blocks LoadBalancer/NodePort Services.
+  ## Default: false (LoadBalancer and NodePort are allowed by default).
+  blockExternalServices: false
+
+## ── COMPLIANCE Phase 1 — Dedicated MongoDB ServiceAccount ────────────────────
+## Control: mdb-rbac-03 (iscf-ia-01)
+## Rendered by: chart/templates/serviceaccount.yaml
+##
+## When enabled=true:
+##   Creates a ServiceAccount + Role + RoleBinding in the instance namespace.
+##   The Role grants only: get/list on pods, configmaps, secrets.
+##   This is separate from the ArgoCD SA (argocd.grantAdminRole above) and
+##   follows the principle of least privilege for the MongoDB VM workload.
+##   Satisfies mdb-rbac-03: "OCP ServiceAccount with minimal RBAC".
+##
+## When enabled=false:
+##   The virt-launcher pod uses the namespace default ServiceAccount.
+##   Use false only if the namespace already provides a compliant dedicated SA.
+##
+## Default: true (opt-out pattern — compliance on by default).
+##
+## Controls NOT covered here (external tooling required):
+##   mdb-rbac-04  VM RBAC approved users only      → Compliance Operator
+## (mdb-rbac-01 and mdb-rbac-02 are checked by the in-cluster compliance CronJob.)
+## ─────────────────────────────────────────────────────────────────────────────
+serviceAccount:
+  enabled: true
+
+## ── COMPLIANCE Phase 1 — Namespace governance label ─────────────────────────
+## mdb-gov-01 → iscf-gov-01
+## Applies the sovereignty/control-owner label to the release namespace via
+## a Helm post-install/post-upgrade Job. This satisfies the platform posture
+## reporting requirement so IBM Concert and the Compliance Operator can
+## attribute controls to this workload.
+##
+## namespaceLabel.enabled:
+##   Set false if the namespace label is managed externally (e.g. via ArgoCD
+##   Namespace manifest). When false, no Job, ServiceAccount, or RBAC
+##   resources are rendered by this chart.
+##   Default: true (self-contained compliance on by default).
+##
+## namespaceLabel.controlOwner:
+##   Value for the sovereignty/control-owner label.
+##   Default: "tenant" (standard sovereign boundary designation).
+##
+## namespaceLabel.tenantId:
+##   Owning tenant (storage account) of the namespace. The hook always applies
+##   sovereign.cloud.ibm.com/account-id, which the spoke admission policy uses
+##   to restrict the namespace to its own tenant's StorageClass. The deployment
+##   namespace IS the tenant ID, so when this is empty the label value is the
+##   namespace name. The hook fails instead of relabelling a namespace that
+##   already carries a different account-id.
+##   Default: "" (use the namespace name).
+## ─────────────────────────────────────────────────────────────────────────────
+governance:
+  namespaceLabel:
+    enabled: true
+    controlOwner: "tenant"
+    tenantId: ""
+
+## ── COMPLIANCE Phase 2 — mongod.conf hardening (cloud-init injected) ─────────
+## These values are written into /etc/mongo-compliance-env at first-boot via
+## cloud-init write_files and consumed by mongo-first-boot.sh to append
+## compliance blocks to mongod.conf. No image rebuild is required.
+##
+## enableEncryption:
+##   Control: mdb-enc-02 → iscf-cr-01 · iscf-dr-06
+##   Enables WiredTiger encryption-at-rest in mongod.conf:
+##     security.enableEncryption: true
+##   IMPORTANT: Requires MongoDB Enterprise Advanced licence (not Community).
+##   IMPORTANT: Pair with diskImage.storageClassName = ocs-*-encrypted for
+##              end-to-end encrypted storage (mdb-enc-05, Phase 1).
+##   Default: false — enable explicitly for compliant deployments.
+##
+## auditLog.enabled:
+##   Controls: mdb-aud-01 → iscf-ia-04 · iscf-gov-03 · iscf-dr-10
+##             mdb-aud-02 → iscf-ia-04 · iscf-gov-02 · iscf-ai-04
+##   Appends to mongod.conf:
+##     auditLog.destination: file
+##     auditLog.format: JSON
+##     auditLog.path: <auditLog.path>
+##     setParameter.auditAuthorizationSuccess: true
+##   auditAuthorizationSuccess=true logs ALL auth decisions (not just failures).
+##   Default: false — enable explicitly for compliant deployments.
+##
+## auditLog.path:
+##   Filesystem path inside the VM for the JSON audit log.
+##   Default: /var/log/mongodb/audit.json
+##
+## Log retention (mdb-aud-03 → iscf-gov-01 · iscf-ai-13):
+##   Checked by the in-cluster compliance CronJob (files/vm_checks.sh).
+##   Retention policy itself is NOT set by this chart.
+##
+## tls (Phase 3 — Vault PKI):
+##   Control: mdb-enc-01 → iscf-cr-03 · iscf-dr-07 · iscf-ai-03
+##   Enables TLS in transit (net.tls.mode: requireTLS) with certificates
+##   issued at boot by the tenant's HashiCorp Vault PKI (vault.* values
+##   below). Full design: encryption-in-transit-vault-pki-implementation.md.
+##   IMPORTANT: the VM image must contain mongo-vault-fetch-certs.py and the
+##   mongo-vault-certs.service unit (securedimage built after 2026-11-11).
+##   IMPORTANT: enabling TLS requires a FRESH deployment — mongod.conf is
+##   written only at first boot (sentinel-guarded).
+##   FAIL CLOSED: no certificate → no mongod, never a plaintext start.
+## ─────────────────────────────────────────────────────────────────────────────
+compliance:
+  ## Phase 2 — mdb-enc-02 (iscf-cr-01/dr-06)
+  ## Set true for encrypted-at-rest. Requires MongoDB EA licence.
+  enableEncryption: false
+
+  auditLog:
+    ## Phase 2 — mdb-aud-01 (iscf-ia-04/gov-03/dr-10) + mdb-aud-02 (iscf-ia-04/gov-02/ai-04)
+    ## Set true to append auditLog block to mongod.conf at first-boot.
+    enabled: false
+    ## Filesystem path inside the VM for the JSON audit log.
+    path: "/var/log/mongodb/audit.json"
+    ## Log all auth decisions (not just failures) — required for mdb-aud-02.
+    auditAuthorizationSuccess: true
+
+  ## Phase 3 — mdb-enc-01 (iscf-cr-03/dr-07/ai-03)
+  ## Set true to enable net.tls.mode: requireTLS with Vault-issued
+  ## certificates (fetched in-guest by mongo-vault-certs.service BEFORE
+  ## mongod first starts). Requires the vault.* block below to be complete.
+  tls:
+    enabled: false
+    ## Certificate source: "vault" (Option B — runtime issue from the tenant
+    ## Vault PKI). Option A ("secret" — pre-created cert Secret) is not
+    ## implemented; the chart fails the render if it is selected.
+    source: "vault"
+    ## Minimum TLS version — MongoDB has no native minimum-version option,
+    ## so this maps to net.tls.disabledProtocols (TLS1_0,TLS1_1 disabled).
+    ## Only TLS1_2 is supported.
+    minimumVersion: "TLS1_2"
+    ## External hostname clients use through the VIP (NodePort/LoadBalancer).
+    ## Added to the certificate SANs so external clients pass hostname
+    ## verification against the name in their connection string.
+    externalHostname: ""
+    ## Leaf certificate TTL (Go duration). 720h = 30 days, renewed daily at
+    ## ≤7 days remaining — ~3 days of Vault-outage tolerance. Keep under
+    ## 365 days (mdb-enc-03).
+    certTTL: "720h"
+    ## Renew when this many days of validity remain (daily timer checks).
+    renewWhenRemainingDays: 7
+
+## ── Vault PKI — certificate source for compliance.tls (Option B) ─────────────
+## Vault (tenant-operated, e.g. IBM Vault Self-Managed for Z and LinuxONE on
+## s390x) runs in its own namespace on the tenant OCP cluster; the VM guests
+## reach it at vault.<namespace>:<port> over TLS.
+##
+## ArgoCD SAFETY: every value below is a plain value — the chart performs NO
+## Helm lookup on this path (lookup is disabled under ArgoCD; the chart
+## hard-fails the render when TLS is enabled and any value is missing, it
+## never silently renders without TLS).
+##
+## wrappedSecretIds are SINGLE-USE response-wrapping tokens: ONE PER VM, in
+## member order (a wrapping token is consumed by the first unwrap, so a
+## 3-member RS needs 3). Mint per deployment (doc Part A5). Their wrapping
+## TTL must cover commit→sync→first-boot on a GitOps flow (use 1–2h).
+## NOTE: updating these values never reaches an EXISTING VM (cloud-init
+## write_files runs only when the instance-id changes) — rotate by
+## re-creating the VM or dropping new material in-guest.
+vault:
+  ## Vault Service address as seen from the VM pod network.
+  address: ""
+  ## KUBERNETES namespace where Vault runs (NetworkPolicy egress target).
+  namespace: "vault"
+  ## Vault Service port (NetworkPolicy egress port).
+  port: 8200
+  ## PKI mount + role that issue the mongod certificates (doc Part A3).
+  pkiMount: "pki_int"
+  pkiRole: "mongodb-server"
+  ## AppRole RoleID — an identifier, NOT a secret (safe at 0444 in-guest).
+  roleId: ""
+  ## RoleID of the RENEWAL AppRole (also not a secret). The renewal
+  ## secret-ids belong to that role; AppRole login requires the matching
+  ## role_id/secret_id pair, so the renewal branch uses this one.
+  renewalRoleId: ""
+  ## Single-use response-wrapping tokens, ONE PER VM, in member order.
+  wrappedSecretIds: []
+  ## Persistent renewal secret-ids, ONE PER VM, in member order (used by the
+  ## daily renewal timer after the single-use bootstrap token is consumed).
+  renewalSecretIds: []
+  ## CA (PEM) that signed Vault's own HTTPS listener — PUBLIC material,
+  ## distinct from the PKI CA (which the issue response returns). Multi-line
+  ## PEM literal.
+  caCert: ""
+
+## ── Logging — rsyslog forwarding / custom config ─────────────────────────────
+## Injects /etc/rsyslog.d/60-mongodb.conf into the VM guest via cloud-init.
+## rsyslog is already present in the RHEL 9 base image; no image rebuild needed.
+##
+## When rsyslog.enabled=true:
+##   A drop-in rsyslog config file is written at first-boot and rsyslog is
+##   restarted so MongoDB log files (mongod.log, audit.json) are processed
+##   according to the rules below.
+##
+## forwarding.enabled:
+##   Forwards all MongoDB log lines to a remote syslog server over TCP (default)
+##   or UDP. The remote server must be reachable from the VM pod network.
+##   Protocol: "tcp" (reliable, recommended) or "udp" (low-overhead).
+##   Format: "rfc3164" (BSD syslog), "rfc5424" (structured), "json" (LEEF/CEF-like).
+##
+## fileMonitoring.mongodLog / fileMonitoring.auditLog:
+##   imfile-based tailing of the mongod log and (when audit is enabled) the
+##   audit JSON file. Both tag their messages so the remote SIEM can distinguish them.
+##
+## rateLimit:
+##   Protects the VM from log-storm conditions. Applies to the imfile inputs only.
+##   intervalSeconds/burstCount: allow burstCount messages per intervalSeconds window.
+##   Set intervalSeconds: 0 to disable rate limiting.
+##
+## customConf:
+##   Verbatim rsyslog.conf snippet appended AFTER the generated rules.
+##   Use for advanced directives (e.g. TLS outputs, queue tuning, omfwd options)
+##   that are not covered by the structured fields above.
+##   Leave empty ("") to skip.
+## ─────────────────────────────────────────────────────────────────────────────
+logging:
+  rsyslog:
+    ## Set true to write /etc/rsyslog.d/60-mongodb.conf and restart rsyslog.
+    enabled: false
+
+    ## Remote syslog forwarding
+    forwarding:
+      enabled: false
+      ## Remote host — hostname or IP of your syslog server / SIEM collector.
+      host: ""
+      ## Remote port (514 UDP/TCP standard; 6514 for TLS).
+      port: 514
+      ## Transport: "tcp" (reliable) or "udp" (low-overhead).
+      protocol: "tcp"
+      ## Wire format: "rfc3164" | "rfc5424" | "json"
+      format: "rfc5424"
+
+    ## File-based input monitoring (imfile) — tail MongoDB log files.
+    fileMonitoring:
+      mongodLog:
+        ## Set true to tail /var/log/mongodb/mongod.log via rsyslog imfile.
+        enabled: true
+        ## Tag applied in syslog messages — useful for SIEM filter rules.
+        tag: "mongodb-mongod"
+        ## Syslog facility for these messages (local0–local7 or daemon).
+        facility: "local6"
+        ## Syslog severity (info, notice, warning, err, crit).
+        severity: "info"
+      auditLog:
+        ## Set true to tail the MongoDB JSON audit log via rsyslog imfile.
+        ## Only meaningful when compliance.auditLog.enabled=true.
+        enabled: false
+        ## Must match compliance.auditLog.path if changed there.
+        path: "/var/log/mongodb/audit.json"
+        tag: "mongodb-audit"
+        facility: "local7"
+        severity: "notice"
+
+    ## Rate limiting for imfile inputs — prevents log-storm conditions.
+    rateLimit:
+      ## Time window in seconds. Set 0 to disable.
+      intervalSeconds: 5
+      ## Maximum messages allowed within intervalSeconds.
+      burstCount: 500
+
+    ## Verbatim rsyslog config snippet appended after the generated rules.
+    ## Use for advanced directives not covered by the structured fields above.
+    ## Example: TLS output with certificate pinning, omfwd queue tuning, etc.
+    ## Leave empty ("") to skip.
+    customConf: ""
+
+  ## ── Centralised log shipping (mdb-aud-05 / iscf-mi-01 / iscf-dr-10) ──
+  ## Fluent-bit DaemonSet that tails /var/log/mongodb from the host node and
+  ## forwards MongoDB audit and mongod logs to a sovereign SIEM endpoint over TLS.
+  ## (Lives under the same top-level `logging:` key as rsyslog above — YAML does
+  ##  not allow duplicate top-level keys.)
+  ##
+  ## The DaemonSet pod runs as non-root (UID 1000) with readOnlyRootFilesystem=true.
+  ##
+  ## Prerequisites:
+  ##   - SIEM endpoint reachable from worker node pod network
+  ##   - TLS certificate chain valid for siemEndpoint (or set tlsEnabled: false
+  ##     for plaintext in controlled/airgapped environments only)
+  ##
+  ## Default: disabled — enable explicitly for production deployments or use
+  ##          values-production.yaml.
+  ## ────────────────────────────────────────────────────────────────────────────
+  fluentbit:
+    ## Set true to deploy the Fluent-bit DaemonSet for centralised log shipping.
+    enabled: false
+    ## FQDN or IP of the sovereign SIEM / log aggregator endpoint.
+    ## Example: "siem.example.com" or "logstash.logging.svc.cluster.local"
+    siemEndpoint: ""
+    ## TCP port on the SIEM endpoint (Logstash/Beats default: 5044)
+    siemPort: 5044
+    ## Set true to enable TLS on the Fluent-bit forward output.
+    ## Strongly recommended for production — disable only in isolated environments.
+    tlsEnabled: true
+
+## ArgoCD RBAC — grants admin role to ArgoCD SA in the target namespace
+## Required for ArgoCD to manage Services and other core resources
+argocd:
+  grantAdminRole: true
+
+## ── Backup / DR (mdb-dr-01 / iscf-dr-05 / iscf-dr-08 / iscf-re-01) ────
+## Velero Schedule for namespace-level backup of the MongoDB VM and all its
+## associated resources (PVC, Secrets, Services).
+##
+## Prerequisites:
+##   - Velero installed on the spoke cluster (velero.io/v1 CRDs available)
+##   - A BackupStorageLocation named 'default' (or override backup.storageLocation)
+##   - CSI-capable snapshot provider for RWO block PVCs
+##
+## Default: disabled — enable explicitly for production deployments or use
+##          values-production.yaml which sets backup.enabled: true.
+##
+## Acceptance criteria:
+##   helm lint passes
+##   oc get schedule -n <ns> shows schedule when backup.enabled=true
+## ────────────────────────────────────────────────────────────────────────────
+backup:
+  ## Set true to create a Velero Schedule in the instance namespace.
+  enabled: false
+  ## Cron expression (UTC) — default: daily at 02:00
+  schedule: "0 2 * * *"
+  ## Backup retention (Velero TTL format). Default: 30 days
+  retention: "720h"
+  ## Velero BackupStorageLocation name. Default: "default"
+  storageLocation: "default"
+
+## ── RS health monitoring (mdb-rs-01 / iscf-re-01 / iscf-re-03) ──
+## PrometheusRule alerting on unhealthy replica set members.
+## Requires Prometheus Operator (monitoring.coreos.com/v1 CRDs) and a
+## mongodb-exporter scrape target with job label matching the release name.
+##
+## Three alerts rendered when enabled:
+##   MongoDBReplicaSetMemberUnhealthy — individual member health == 0
+##   MongoDBReplicaSetDegraded        — fewer than replicaCount PRIMARY/SECONDARY members
+##   MongoDBReplicaSetNoPrimary       — no PRIMARY exists (write outage)
+##
+## Default: disabled — enable for production deployments.
+## ────────────────────────────────────────────────────────────────────────────
+monitoring:
+  ## Set true to deploy the PrometheusRule for RS health alerts.
+  enabled: false
+  ## Scrape interval passed to the PrometheusRule group (must match your Prometheus config).
+  scrapeInterval: "30s"
+  ## How long a condition must persist before the alert fires (Prometheus 'for' duration).
+  alertPendingDuration: "2m"
+
+## ── NTP site override (mdb-vm-01 / iscf-mi-03) ─────────────
+## When ntp.server is set, the value is injected into the VM's chrony.conf
+## via cloud-init write_files as an additional NTP server directive, allowing
+## site-specific NTP infrastructure to be used instead of the RHEL default pool.
+##
+## The NTP stratum check in mongo-first-boot.sh runs regardless of this setting.
+## Set to "" to use the default chrony configuration baked into the image.
+## ────────────────────────────────────────────────────────────────────────────
+ntp:
+  ## Site-specific NTP server FQDN or IP (e.g. "ntp.example.com").
+  ## Leave empty to use the default NTP configuration from the bootc image.
+  server: ""

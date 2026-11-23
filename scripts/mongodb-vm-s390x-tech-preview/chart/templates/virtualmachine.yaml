@@ -1,0 +1,197 @@
+{{- $root := . }}
+{{- if include "mongodb-vm.val" (list . "ha.enabled") | eq "true" }}
+{{- /*
+  HA mode: render one VirtualMachine per replica set member.
+  Names: <fullname>-0, <fullname>-1, …
+  Member-0 is the primary bootstrap node (runs rs.initiate() via mongo-rs-init.sh).
+*/ -}}
+{{- /*
+  Generate the keyFile ONCE here so all members share the same value.
+  Priority: explicit values.mongodb.keyFile > existing Secret > random generation.
+  Must be outside the range loop — randAlphaNum produces a different value each call.
+*/ -}}
+{{- $base := include "mongodb-vm.fullname" . -}}
+{{- $ns   := .Values.namespaceOverride | default .Release.Namespace -}}
+{{- $keyFileSecretName := printf "%s-keyfile" $base -}}
+{{- $existingSecret := lookup "v1" "Secret" $ns $keyFileSecretName -}}
+{{- $sharedKeyFile := "" -}}
+{{- if .Values.mongodb.keyFile -}}
+{{- /* Explicit value — must be a plain printable string (not base64-encoded).
+       MongoDB keyFile: 6–1024 chars, base64 alphabet recommended.            */ -}}
+{{- $sharedKeyFile = .Values.mongodb.keyFile -}}
+{{- else if $existingSecret -}}
+{{- /* Kubernetes Secret .data is base64-encoded; b64dec gives the plain text. */ -}}
+{{- $sharedKeyFile = index $existingSecret.data "keyfile" | b64dec -}}
+{{- else -}}
+{{- /* Auto-generate: randAlphaNum produces plain alphanumeric text (A-Za-z0-9),
+       which is valid MongoDB keyFile content. Written to disk as plain text —
+       no b64enc/b64dec needed. 1024 chars satisfies the 6–1024 char limit.   */ -}}
+{{- $sharedKeyFile = randAlphaNum 1024 -}}
+{{- end -}}
+{{- /*
+  Resolve passwords ONCE here outside the range loop — same reason as keyFile above.
+  ArgoCD disables the `lookup` function during rendering, so resolvePasswords always
+  falls into the `else` branch and calls randAlphaNum. If called inside the range loop
+  (once per member), each member gets a DIFFERENT randAlphaNum result, so VM-0, VM-1,
+  and VM-2 all get different ADMIN_PASS values. mongo-rs-init.sh (running on VM-0) uses
+  VM-0's ADMIN_PASS to authenticate against VM-1 and VM-2 — which fails because they
+  have different passwords, causing rs.initiate() to never run.
+  Fix: call resolvePasswords ONCE and pass $sharedPasswords into the range loop via $ctx,
+  exactly like $sharedKeyFile is handled.
+*/ -}}
+{{- $sharedPasswords := include "mongodb-vm.resolvePasswords" . | fromJson -}}
+{{- range $i := until (include "mongodb-vm.val" (list . "ha.replicaCount") | default "3" | int) }}
+{{- $ctx := dict "Values" $root.Values "Chart" $root.Chart "Release" $root.Release "index" $i "sharedKeyFile" $sharedKeyFile "sharedPasswords" $sharedPasswords }}
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: {{ include "mongodb-vm.memberName" $ctx }}
+  namespace: {{ $root.Values.namespaceOverride | default $root.Release.Namespace }}
+  labels:
+    {{- include "mongodb-vm.labels" $root | nindent 4 }}
+    mongodb-vm/member-index: {{ $i | quote }}
+    {{- if eq $i 0 }}
+    mongodb-vm/role: primary-bootstrap
+    {{- else }}
+    mongodb-vm/role: secondary
+    {{- end }}
+  annotations:
+    {{- include "mongodb-vm.annotations" $root | nindent 4 }}
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  runStrategy: Always
+  template:
+    metadata:
+      labels:
+        {{- include "mongodb-vm.labels" $root | nindent 8 }}
+        kubevirt.io/domain: {{ include "mongodb-vm.memberName" $ctx }}
+        mongodb-vm/member-index: {{ $i | quote }}
+    spec:
+      ## hostname + subdomain enable per-VM DNS via the headless service:
+      ## <memberName>.<headlessSvcName>.<namespace>.svc.cluster.local
+      ## namespace is dynamic — driven by namespaceOverride or Release.Namespace
+      hostname: {{ include "mongodb-vm.memberName" $ctx }}
+      subdomain: {{ include "mongodb-vm.headlessSvcName" $root }}
+      ## Must target s390x worker nodes
+      nodeSelector:
+        kubernetes.io/arch: s390x
+      ## Hard anti-affinity — each HA member MUST land on a different s390x worker node.
+      ## If fewer nodes than replicaCount are available, the excess VMs will stay Pending
+      ## rather than co-locating, which is the correct HA behaviour.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/instance: {{ include "mongodb-vm.fullname" $root }}
+                  app.kubernetes.io/name: {{ include "mongodb-vm.name" $root }}
+              topologyKey: kubernetes.io/hostname
+      ## Readiness probe — checks that mongod is running and accepting connections.
+      ## TCP socket check on port 27017 allows all replica set members (Primary + Secondaries)
+      ## to report Ready (2/2 Running) ensuring ArgoCD marks the deployment Healthy & Synced.
+      readinessProbe:
+        tcpSocket:
+          port: {{ include "mongodb-vm.val" (list $root "mongodb.port") | default 27017 | int }}
+        periodSeconds: {{ include "mongodb-vm.val" (list $root "vip.probe.periodSeconds") | default "10" | int }}
+        failureThreshold: {{ include "mongodb-vm.val" (list $root "vip.probe.failureThreshold") | default "3" | int }}
+        successThreshold: {{ include "mongodb-vm.val" (list $root "vip.probe.successThreshold") | default "1" | int }}
+        timeoutSeconds: {{ include "mongodb-vm.val" (list $root "vip.probe.timeoutSeconds") | default "3" | int }}
+      domain:
+        ## s390-ccw-virtio is mandatory for IBM Z — do NOT use q35
+        machine:
+          type: {{ include "mongodb-vm.val" (list $root "vm.machineType") | default "s390-ccw-virtio" }}
+        cpu:
+          cores: {{ include "mongodb-vm.val" (list $root "vm.cpuCores") | default "2" | int }}
+        memory:
+          guest: {{ include "mongodb-vm.val" (list $root "vm.memoryGi") | default "4" }}Gi
+        devices:
+          disks:
+            - name: rootdisk
+              disk:
+                bus: virtio
+            - name: cloudinitdisk
+              disk:
+                bus: virtio
+      volumes:
+        - name: rootdisk
+          dataVolume:
+            name: {{ include "mongodb-vm.memberDvName" $ctx }}
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            ## Passwords are in the Secret, NOT inline here.
+            ## KubeVirt reads the "userdata" key from this Secret at VM boot.
+            secretRef:
+              name: {{ $base }}-cloudinit-{{ $i }}
+      ## Concert compliance public key — not a user input and no Helm `lookup` (disabled
+      ## under ArgoCD). The concert-ssh-keygen pre-install hook publishes the public key
+      ## alone in "<concertSSHKeySecret>-pub"; KubeVirt hands it to cloud-init at boot.
+      accessCredentials:
+        - sshPublicKey:
+            source:
+              secret:
+                secretName: {{ include "mongodb-vm.concertSecretName" $root }}-pub
+            propagationMethod:
+              noCloud: {}
+{{- end }}
+{{- else }}
+{{- /*
+  Standalone mode: single VirtualMachine (original behaviour).
+*/ -}}
+{{- $base := include "mongodb-vm.fullname" . -}}
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: {{ include "mongodb-vm.fullname" . }}
+  namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+  annotations:
+    {{- include "mongodb-vm.annotations" . | nindent 4 }}
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  runStrategy: Always
+  template:
+    metadata:
+      labels:
+        {{- include "mongodb-vm.labels" . | nindent 8 }}
+        kubevirt.io/domain: {{ include "mongodb-vm.fullname" . }}
+    spec:
+      ## Must target s390x worker nodes
+      nodeSelector:
+        kubernetes.io/arch: s390x
+      domain:
+        ## s390-ccw-virtio is mandatory for IBM Z — do NOT use q35
+        machine:
+          type: {{ include "mongodb-vm.val" (list . "vm.machineType") | default "s390-ccw-virtio" }}
+        cpu:
+          cores: {{ include "mongodb-vm.val" (list . "vm.cpuCores") | default "2" | int }}
+        memory:
+          guest: {{ include "mongodb-vm.val" (list . "vm.memoryGi") | default "4" }}Gi
+        devices:
+          disks:
+            - name: rootdisk
+              disk:
+                bus: virtio
+            - name: cloudinitdisk
+              disk:
+                bus: virtio
+      volumes:
+        - name: rootdisk
+          dataVolume:
+            name: {{ include "mongodb-vm.dvName" . }}
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            ## Passwords are in the Secret, NOT inline here.
+            ## KubeVirt reads the "userdata" key from this Secret at VM boot.
+            secretRef:
+              name: {{ $base }}-cloudinit
+      ## Concert compliance public key — see the HA template above.
+      accessCredentials:
+        - sshPublicKey:
+            source:
+              secret:
+                secretName: {{ include "mongodb-vm.concertSecretName" . }}-pub
+            propagationMethod:
+              noCloud: {}
+{{- end }}

@@ -1,0 +1,322 @@
+{{/*
+concert-ssh-keygen-hook.yaml
+
+Helm pre-install/pre-upgrade hook that generates an RSA 3072 SSH keypair for
+Concert MSP compliance access and stores it in a per-instance Secret
+"<instance>-concert-ssh" (public key alone in "<instance>-concert-ssh-pub") in the
+release namespace.
+
+Lifecycle: a post-install/post-upgrade hook (an ArgoCD Sync hook, so it does not wait for
+the VMs to be Healthy) at the end of this file makes the
+"<instance>-mongodb-creds" Secret the owner of both key Secrets, so Kubernetes
+garbage collection deletes the keypair together with the instance. Setting
+concertSSHKeySecret opts out (a deliberately shared key is never garbage-collected).
+
+Behaviour:
+  - Runs BEFORE any VM is created (hook-weight: -5)
+  - Idempotent: if the Secret already exists with a valid key, the job exits 0
+    without overwriting it (so the keypair survives chart upgrades)
+  - The public key is stored under .data.authorized_key (plain text, base64-encoded)
+  - The private key is stored under .data.private_key for Concert to retrieve
+  - Cloud-init userdata (_helpers.tpl) looks up this Secret at render time and
+    injects .data.authorized_key into both root and cloud-user authorized_keys
+
+Concert workflow:
+  1. This hook creates the Secret on first install
+  2. The chart injects the public key into every VM via cloud-init
+  3. Concert retrieves the private key from the Secret to SSH into the VMs
+     for compliance scans — no manual key distribution needed
+*/}}
+{{- if and (include "mongodb-vm.val" (list . "ssh.enabled") | eq "true") (not .Values.concertSSHKeySecret) }}
+{{- $ns := .Values.namespaceOverride | default .Release.Namespace }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "mongodb-vm.fullname" . }}-keygen-sa
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "mongodb-vm.fullname" . }}-keygen-role
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "mongodb-vm.fullname" . }}-keygen-rb
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "mongodb-vm.fullname" . }}-keygen-role
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "mongodb-vm.fullname" . }}-keygen-sa
+    namespace: {{ $ns }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "mongodb-vm.fullname" . }}-concert-keygen
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      ## Deliberately NOT the instance selector labels: the instance NetworkPolicy
+      ## (egress-restricted) must not apply to this hook pod so it can reach the API server.
+      labels:
+        app.kubernetes.io/name: {{ include "mongodb-vm.name" . }}-keygen
+        app.kubernetes.io/component: concert-keygen-hook
+    spec:
+      serviceAccountName: {{ include "mongodb-vm.fullname" . }}-keygen-sa
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: keygen
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: SECRET_NAME
+              value: {{ include "mongodb-vm.concertSecretName" . | quote }}
+            - name: NAMESPACE
+              value: {{ $ns | quote }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+
+              # Public-key-only Secret consumed by the VMs (KubeVirt accessCredentials
+              # treats EVERY entry of its source Secret as a public key, so it must not
+              # contain the private key). Always (re)written so it survives upgrades.
+              publish_pub() {
+                oc create secret generic "${SECRET_NAME}-pub" \
+                  -n "$NAMESPACE" \
+                  --from-literal=authorized_key="$1" \
+                  --dry-run=client -o yaml | oc apply -f -
+                echo "Secret ${SECRET_NAME}-pub holds the Concert public key"
+              }
+
+              # Fast-path idempotency check — if Secret already exists, publish pub key and exit immediately (< 1s)
+              if oc get secret "$SECRET_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
+                EXISTING_PUB=$(oc get secret "$SECRET_NAME" -n "$NAMESPACE" \
+                     -o jsonpath='{.data.authorized_key}' 2>/dev/null \
+                     | base64 -d 2>/dev/null || true)
+                if [ -n "$EXISTING_PUB" ]; then
+                  echo "Secret $SECRET_NAME already has a valid SSH public key — skipping keygen"
+                  publish_pub "$EXISTING_PUB"
+                  exit 0
+                fi
+              fi
+
+              # Generate an RSA 3072 keypair using Python stdlib only (no external deps).
+              # RSA, not ed25519: the image's sshd crypto policy rejects ssh-ed25519; and RSA, not ECDSA,
+              # because Concert's ssh2 cannot use an ECDSA private key.
+              # Private key is PKCS#1 PEM (BEGIN RSA PRIVATE KEY), which Concert's ssh2 accepts.
+              # The image's sshd accepts rsa-sha2-256/512, which ssh2 signs with.
+              # Script is base64-encoded to avoid YAML/heredoc conflicts with << operator.
+              # Verified working: Python 3.6+ stdlib only, no cryptography lib needed.
+              echo "aW1wb3J0IG9zLCBiYXNlNjQsIHN0cnVjdAoKZGVmIGlzX3ByaW1lKG4sIHJvdW5kcz00MCk6CiAgICBpZiBuIDwgMjogcmV0dXJuIEZhbHNlCiAgICBmb3Igc3AgaW4gKDIsIDMsIDUsIDcsIDExLCAxMywgMTcsIDE5LCAyMywgMjksIDMxLCAzNyk6CiAgICAgICAgaWYgbiAlIHNwID09IDA6IHJldHVybiBuID09IHNwCiAgICBkLCBzID0gbiAtIDEsIDAKICAgIHdoaWxlIGQgJSAyID09IDA6IGQgLy89IDI7IHMgKz0gMQogICAgZm9yIF8gaW4gcmFuZ2Uocm91bmRzKToKICAgICAgICBhID0gaW50LmZyb21fYnl0ZXMob3MudXJhbmRvbSgobi5iaXRfbGVuZ3RoKCkgKyA3KSAvLyA4KSwgImJpZyIpICUgKG4gLSAzKSArIDIKICAgICAgICB4ID0gcG93KGEsIGQsIG4pCiAgICAgICAgaWYgeCBpbiAoMSwgbiAtIDEpOiBjb250aW51ZQogICAgICAgIGZvciBfIGluIHJhbmdlKHMgLSAxKToKICAgICAgICAgICAgeCA9IHBvdyh4LCAyLCBuKQogICAgICAgICAgICBpZiB4ID09IG4gLSAxOiBicmVhawogICAgICAgIGVsc2U6CiAgICAgICAgICAgIHJldHVybiBGYWxzZQogICAgcmV0dXJuIFRydWUKCmRlZiBnZW5fcHJpbWUoYml0cyk6CiAgICB3aGlsZSBUcnVlOgogICAgICAgIGMgPSBpbnQuZnJvbV9ieXRlcyhvcy51cmFuZG9tKGJpdHMgLy8gOCksICJiaWciKSB8ICgxIDw8IChiaXRzIC0gMSkpIHwgKDEgPDwgKGJpdHMgLSAyKSkgfCAxCiAgICAgICAgaWYgaXNfcHJpbWUoYyk6IHJldHVybiBjCgpkZWYgaW52KGEsIG0pOgogICAgcjAsIHIxLCBzMCwgczEgPSBtLCBhICUgbSwgMCwgMQogICAgd2hpbGUgcjE6CiAgICAgICAgayA9IHIwIC8vIHIxCiAgICAgICAgcjAsIHIxLCBzMCwgczEgPSByMSwgcjAgLSBrICogcjEsIHMxLCBzMCAtIGsgKiBzMQogICAgcmV0dXJuIHMwICUgbQoKZSA9IDY1NTM3CndoaWxlIFRydWU6CiAgICBwLCBxID0gZ2VuX3ByaW1lKDE1MzYpLCBnZW5fcHJpbWUoMTUzNikKICAgIGlmIHAgPT0gcTogY29udGludWUKICAgIG4gPSBwICogcQogICAgcGhpID0gKHAgLSAxKSAqIChxIC0gMSkKICAgIGlmIG4uYml0X2xlbmd0aCgpID09IDMwNzIgYW5kIHBoaSAlIGUgIT0gMDogYnJlYWsKaWYgcCA8IHE6IHAsIHEgPSBxLCBwCmQgPSBpbnYoZSwgcGhpKQoKZGVmIGRlcl9sZW4obik6CiAgICBpZiBuIDwgMTI4OiByZXR1cm4gYnl0ZXMoW25dKQogICAgYiA9IG4udG9fYnl0ZXMoKG4uYml0X2xlbmd0aCgpICsgNykgLy8gOCwgImJpZyIpCiAgICByZXR1cm4gYnl0ZXMoWzB4ODAgfCBsZW4oYildKSArIGIKZGVmIGRlcl9pbnQoaSk6CiAgICBiID0gaS50b19ieXRlcygoaS5iaXRfbGVuZ3RoKCkgKyA3KSAvLyA4IG9yIDEsICJiaWciKQogICAgaWYgYlswXSAmIDB4ODA6IGIgPSBiIlx4MDAiICsgYgogICAgcmV0dXJuIGIiXHgwMiIgKyBkZXJfbGVuKGxlbihiKSkgKyBiCmJvZHkgPSBiIiIuam9pbihkZXJfaW50KHgpIGZvciB4IGluICgwLCBuLCBlLCBkLCBwLCBxLCBkICUgKHAgLSAxKSwgZCAlIChxIC0gMSksIGludihxLCBwKSkpCmRlciA9IGIiXHgzMCIgKyBkZXJfbGVuKGxlbihib2R5KSkgKyBib2R5CmI2NCA9IGJhc2U2NC5iNjRlbmNvZGUoZGVyKS5kZWNvZGUoKQpwcml2ID0gIi0tLS0tQkVHSU4gUlNBIFBSSVZBVEUgS0VZLS0tLS1cbiIgKyAiXG4iLmpvaW4oYjY0W2k6aSArIDY0XSBmb3IgaSBpbiByYW5nZSgwLCBsZW4oYjY0KSwgNjQpKSArICJcbi0tLS0tRU5EIFJTQSBQUklWQVRFIEtFWS0tLS0tXG4iCgpkZWYgZW5jKGIpOiByZXR1cm4gc3RydWN0LnBhY2soIj5JIiwgbGVuKGIpKSArIGIKZGVmIG1waW50KGkpOgogICAgYiA9IGkudG9fYnl0ZXMoKGkuYml0X2xlbmd0aCgpICsgNykgLy8gOCwgImJpZyIpCiAgICByZXR1cm4gZW5jKChiIlx4MDAiICsgYikgaWYgYlswXSAmIDB4ODAgZWxzZSBiKQp3aXJlID0gZW5jKGIic3NoLXJzYSIpICsgbXBpbnQoZSkgKyBtcGludChuKQpwdWIgPSAic3NoLXJzYSAiICsgYmFzZTY0LmI2NGVuY29kZSh3aXJlKS5kZWNvZGUoKSArICIgY29uY2VydC1jb21wbGlhbmNlIgpvcGVuKCIvdG1wL2NvbmNlcnQtcHViLnR4dCIsICJ3Iikud3JpdGUocHViKQpvcGVuKCIvdG1wL2NvbmNlcnQtcHJpdi50eHQiLCAidyIpLndyaXRlKHByaXYpCnByaW50KCJHZW5lcmF0ZWQgc3NoLXJzYSAzMDcyIGtleXBhaXIgKHN0ZGxpYiBvbmx5KSIpCg==" \
+                | base64 -d > /tmp/keygen.py
+              python3 /tmp/keygen.py
+              rm -f /tmp/keygen.py
+
+              PUB_KEY=$(cat /tmp/concert-pub.txt)
+              PRIV_KEY=$(cat /tmp/concert-priv.txt)
+              rm -f /tmp/keygen.py /tmp/concert-pub.txt /tmp/concert-priv.txt
+
+              # $(...) strips the trailing newline of the key file; OpenSSH rejects a
+              # private key without it ("invalid format"), so add it back.
+              oc create secret generic "$SECRET_NAME" \
+                -n "$NAMESPACE" \
+                --from-literal=authorized_key="$PUB_KEY" \
+                --from-literal=private_key="$PRIV_KEY"$'\n' \
+                --dry-run=client -o yaml | oc apply -f -
+
+              oc annotate secret "$SECRET_NAME" -n "$NAMESPACE" --overwrite \
+                "concert.sovcore.ibm.com/keygen-version=${KEYGEN_VERSION}"
+              echo "Created Secret $SECRET_NAME with Concert compliance SSH keypair"
+              publish_pub "$PUB_KEY"
+{{- if not .Values.concertSSHKeySecret }}
+{{- $keySecret := include "mongodb-vm.concertSecretName" . }}
+{{- $credsSecret := printf "%s-mongodb-creds" (include "mongodb-vm.fullname" .) }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "mongodb-vm.fullname" . }}-keyown-sa
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    argocd.argoproj.io/hook: Sync
+    ## Explicit wave 0 (same as the creds Secret). Without it ArgoCD turns helm.sh/hook-weight
+    ## into a negative wave that runs BEFORE the creds Secret exists and deadlocks the sync.
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "mongodb-vm.fullname" . }}-keyown-role
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    argocd.argoproj.io/hook: Sync
+    ## Explicit wave 0 (same as the creds Secret). Without it ArgoCD turns helm.sh/hook-weight
+    ## into a negative wave that runs BEFORE the creds Secret exists and deadlocks the sync.
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ $credsSecret | quote }}]
+    verbs: ["get"]
+  ## The API server only lets a user set ownerReferences on an object it is allowed to delete
+  ## (OwnerReferencesPermissionEnforcement), so "delete" is needed on the two key Secrets only.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ $keySecret | quote }}, {{ printf "%s-pub" $keySecret | quote }}]
+    verbs: ["get", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "mongodb-vm.fullname" . }}-keyown-rb
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    argocd.argoproj.io/hook: Sync
+    ## Explicit wave 0 (same as the creds Secret). Without it ArgoCD turns helm.sh/hook-weight
+    ## into a negative wave that runs BEFORE the creds Secret exists and deadlocks the sync.
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "mongodb-vm.fullname" . }}-keyown-role
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "mongodb-vm.fullname" . }}-keyown-sa
+    namespace: {{ $ns }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "mongodb-vm.fullname" . }}-concert-keyown
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    argocd.argoproj.io/hook: Sync
+    ## Explicit wave 0 (same as the creds Secret). Without it ArgoCD turns helm.sh/hook-weight
+    ## into a negative wave that runs BEFORE the creds Secret exists and deadlocks the sync.
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      ## Deliberately NOT the instance selector labels: the instance NetworkPolicy
+      ## (egress-restricted) exists by now and must not apply to this pod.
+      labels:
+        app.kubernetes.io/component: concert-keyown-hook
+    spec:
+      serviceAccountName: {{ include "mongodb-vm.fullname" . }}-keyown-sa
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: keyown
+          image: registry.redhat.io/openshift4/ose-cli:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              NS={{ $ns | quote }}
+              # Wait for the creds Secret: under ArgoCD this runs in the main sync (not PostSync,
+              # which waits for the VMs to be Healthy, and secondaries are never Ready).
+              OWNER_UID=""
+              for i in $(seq 1 60); do
+                OWNER_UID=$(oc get secret {{ $credsSecret | quote }} -n "$NS" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+                [ -n "$OWNER_UID" ] && break
+                sleep 5
+              done
+              [ -n "$OWNER_UID" ] || { echo "creds Secret not found"; exit 1; }
+              for s in {{ $keySecret | quote }} {{ printf "%s-pub" $keySecret | quote }}; do
+                oc patch secret "$s" -n "$NS" --type=merge -p \
+                  '{"metadata":{"ownerReferences":[{"apiVersion":"v1","kind":"Secret","name":{{ $credsSecret | quote }},"uid":"'"$OWNER_UID"'","blockOwnerDeletion":false}]}}'
+                echo "Secret $s now owned by {{ $credsSecret }} (deleted with the instance)"
+              done
+{{- end }}
+{{- end }}

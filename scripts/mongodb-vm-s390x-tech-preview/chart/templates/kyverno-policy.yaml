@@ -1,0 +1,83 @@
+{{- /*
+  Control: mdb-net-03 (iscf-dr-03 / iscf-dr-04)
+  Kyverno Policy — block LoadBalancer and NodePort Services in the mongodb-vm namespace.
+
+  Render behaviour
+  ──────────────────────────────────────────────────────────────────────────────
+  Default (network.blockExternalServices: false):
+    This template renders NOTHING. LoadBalancer and NodePort Services are
+    allowed. Use this mode during development, testing, or when MetalLB /
+    external access is intentionally required.
+
+  Opt-in enforcement (network.blockExternalServices: true):
+    A Kyverno namespaced Policy is created in the release namespace.
+    validationFailureAction: Enforce — any kubectl / ArgoCD apply that
+    creates a Service of type LoadBalancer or NodePort is rejected with a
+    clear compliance message. ClusterIP and ExternalName are always permitted.
+
+  How to enable:
+    helm upgrade --install <release> ./chart \
+      --set network.blockExternalServices=true
+
+  Prerequisites:
+    Kyverno must be installed on the cluster (kyverno.io/v1 CRDs present).
+    The Policy CRD (namespaced) is used — not ClusterPolicy — so only the
+    release namespace is affected.
+
+  Acceptance criteria:
+    - With blockExternalServices=false, LoadBalancer and NodePort Services
+      deploy without any Kyverno interference (default behaviour preserved).
+    - With blockExternalServices=true, `kubectl apply` of type:LoadBalancer
+      in the mongodb-vm namespace is rejected by Kyverno.
+    - ClusterIP VIP service deploys correctly in both modes.
+    - helm lint passes in both modes.
+*/ -}}
+{{- if include "mongodb-vm.val" (list . "network.blockExternalServices") | eq "true" }}
+---
+apiVersion: kyverno.io/v1
+kind: Policy
+metadata:
+  name: {{ include "mongodb-vm.fullname" . }}-restrict-svc-type
+  namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+    app.kubernetes.io/component: compliance-policy
+  annotations:
+    {{- include "mongodb-vm.annotations" . | nindent 4 }}
+    ## COMPLIANCE mdb-net-03 → iscf-dr-03 · iscf-dr-04
+    com.ibm.sovereigncore.compliance.control: "mdb-net-03"
+    com.ibm.sovereigncore.compliance.iscf-refs: "iscf-dr-03,iscf-dr-04"
+    ## Policy is opt-in; disable by setting network.blockExternalServices=false.
+    com.ibm.sovereigncore.compliance.opt-in: "network.blockExternalServices=true"
+spec:
+  ## Enforce — reject at admission time (not just audit).
+  ## Change to Audit if you want visibility without blocking.
+  validationFailureAction: Enforce
+  ## background=true: also scan existing Services in the namespace.
+  background: true
+  rules:
+    - name: no-loadbalancer-or-nodeport
+      match:
+        any:
+          - resources:
+              kinds:
+                - Service
+              namespaces:
+                - {{ .Values.namespaceOverride | default .Release.Namespace | quote }}
+      ## Exempt the chart's own VIP service when lb_type=external/local so that
+      ## operators who intentionally configure the VIP with MetalLB can do so by
+      ## turning this policy off (network.blockExternalServices=false) rather than
+      ## fighting Kyverno exclusions.
+      validate:
+        message: >-
+          Services of type LoadBalancer or NodePort are not permitted in namespace
+          {{ .Values.namespaceOverride | default .Release.Namespace }} without compliance
+          sign-off. Set network.blockExternalServices=false in chart values to allow
+          external Service types, or change the Service to type ClusterIP.
+          Control: mdb-net-03 / iscf-dr-03 / iscf-dr-04.
+        pattern:
+          spec:
+            ## Allow only ClusterIP and ExternalName.
+            ## Kyverno pattern matching: value must equal one of these strings.
+            type: "ClusterIP | ExternalName"
+{{- end }}

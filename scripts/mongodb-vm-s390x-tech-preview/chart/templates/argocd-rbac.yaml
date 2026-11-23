@@ -1,0 +1,53 @@
+{{- if include "mongodb-vm.val" (list . "argocd.grantAdminRole") | default "true" | eq "true" }}
+## Role — grants ArgoCD only the permissions it needs to manage this chart's resources.
+## Scoped to the target namespace. Does NOT grant cluster-wide privileges.
+##
+## Resources managed by this chart:
+##   kubevirt.io        — VirtualMachine (create/delete/patch/get/list/watch)
+##   cdi.kubevirt.io    — DataVolume     (create/delete/patch/get/list/watch)
+##   core               — Service, ServiceAccount, ConfigMap (create/delete/patch/get/list/watch)
+##   rbac               — RoleBinding (create/delete/patch/get/list/watch — needed for this manifest)
+##
+## If you remove ArgoCD's ability to manage RoleBindings you must apply this
+## manifest out-of-band (kubectl apply -f argocd-rbac.yaml) before the first sync.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argocd-mongodb-vm-manager
+  namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+rules:
+  ## KubeVirt VirtualMachine CRD
+  - apiGroups: ["kubevirt.io"]
+    resources: ["virtualmachines", "virtualmachineinstances"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  ## CDI DataVolume CRD
+  - apiGroups: ["cdi.kubevirt.io"]
+    resources: ["datavolumes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  ## Core resources used by the chart
+  - apiGroups: [""]
+    resources: ["services", "serviceaccounts", "configmaps", "namespaces"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  ## RBAC — needed so ArgoCD can manage this RoleBinding itself
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argocd-mongodb-vm-manager
+  namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+  labels:
+    {{- include "mongodb-vm.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argocd-mongodb-vm-manager
+subjects:
+  - kind: ServiceAccount
+    name: openshift-gitops-argocd-application-controller
+    namespace: openshift-gitops
+{{- end }}
