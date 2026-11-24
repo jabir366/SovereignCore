@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup-tenant.sh
+# configure-tenant-cluster.sh
 #
 # Onboards a fresh OCP spoke cluster as a BYOP tenant for MongoDB EA on s390x.
 # Does the following:
@@ -16,23 +16,24 @@
 # Run this from a bastion that has oc access to the SPOKE cluster.
 #
 # Usage:
-#   bash setup-tenant.sh [OPTIONS]
+#   bash configure-tenant-cluster.sh [OPTIONS]
 #
 #   Options:
 #     --registry  <host>      Quay registry hostname (required, e.g. registry-quay-quay-enterprise.apps.hub.example.com)
 #     --user      <username>  Quay username (default: quayadmin)
 #     --password  <password>  Quay password (required; or set QUAY_PASSWORD)
-#     --ca-cert   <path>      Path to custom CA certificate file (optional)
+#     -y, --yes               Skip the confirmation prompt for the current oc cluster
 #     -h, --help              Show this help and exit
 #
 # Examples:
-#   bash setup-tenant.sh \
+#   bash configure-tenant-cluster.sh \
 #     --registry registry-quay-quay-enterprise.apps.example.com \
 #     --user quayadmin \
 #     --password <password>
 #
 # Prerequisites:
-#   - SPOKE_KUBECONFIG or SPOKE_API + SPOKE_TOKEN configured below
+#   - oc logged in to the spoke cluster (you will be asked to confirm it), or
+#     SPOKE_KUBECONFIG / SPOKE_API + SPOKE_TOKEN set to target it explicitly
 
 set -euo pipefail
 
@@ -44,7 +45,7 @@ set -euo pipefail
 QUAY_REGISTRY="${QUAY_REGISTRY:-}"
 QUAY_USER="${QUAY_USER:-quayadmin}"
 QUAY_PASSWORD="${QUAY_PASSWORD:-}"
-QUAY_CA_CERT_FILE="${QUAY_CA_CERT_FILE:-}"
+ASSUME_YES=false
 
 # ---------------------------------------------------------------------------
 # CLI argument parsing
@@ -60,7 +61,7 @@ while [[ $# -gt 0 ]]; do
     --registry)  QUAY_REGISTRY="${2:?'--registry requires a value'}"; shift 2 ;;
     --user)      QUAY_USER="${2:?'--user requires a value'}";         shift 2 ;;
     --password)  QUAY_PASSWORD="${2:?'--password requires a value'}"; shift 2 ;;
-    --ca-cert)   QUAY_CA_CERT_FILE="${2:?'--ca-cert requires a value'}"; shift 2 ;;
+    -y|--yes)    ASSUME_YES=true; shift ;;
     -h|--help)   usage ;;
     *) echo "Unknown option: $1" >&2; usage ;;
   esac
@@ -82,13 +83,13 @@ QUAY_REGISTRY="${QUAY_REGISTRY#http://}"
 QUAY_REGISTRY="${QUAY_REGISTRY%/}"
 
 # CA cert file path for this specific registry
-if [[ -z "$QUAY_CA_CERT_FILE" ]]; then
-  SAFE_REG_NAME=$(echo "$QUAY_REGISTRY" | tr '/:' '_')
-  QUAY_CA_CERT_FILE="/tmp/quay-ca-${SAFE_REG_NAME}.crt"
-fi
+SAFE_REG_NAME=$(echo "$QUAY_REGISTRY" | tr '/:' '_')
+QUAY_CA_CERT_FILE="/tmp/quay-ca-${SAFE_REG_NAME}.crt"
 
 
-# Spoke cluster access — set SPOKE_KUBECONFIG, OR both SPOKE_API + SPOKE_TOKEN
+# Spoke cluster access (all optional). If none are set, the currently logged-in
+# oc context is used after the user confirms it.
+#   SPOKE_KUBECONFIG, OR both SPOKE_API + SPOKE_TOKEN
 SPOKE_KUBECONFIG="${SPOKE_KUBECONFIG:-}"   # e.g. /root/.kube/spoke.kubeconfig
 SPOKE_API="${SPOKE_API:-}"                 # e.g. https://api.ocpz-standard-5.xxx:6443
 SPOKE_TOKEN="${SPOKE_TOKEN:-}"             # cluster-admin token on spoke
@@ -102,16 +103,34 @@ ok()   { echo "[$(date '+%H:%M:%S')] ✅ $*"; }
 warn() { echo "[$(date '+%H:%M:%S')] ⚠️  $*"; }
 fail() { echo "[$(date '+%H:%M:%S')] ❌ $*" >&2; exit 1; }
 
-# Run oc against the spoke cluster
+# Run oc against the spoke cluster (explicit kubeconfig/token, else current oc context)
 spoke() {
   if [[ -n "$SPOKE_KUBECONFIG" ]]; then
     KUBECONFIG="$SPOKE_KUBECONFIG" oc "$@"
   elif [[ -n "$SPOKE_API" && -n "$SPOKE_TOKEN" ]]; then
     oc --server="$SPOKE_API" --token="$SPOKE_TOKEN" --insecure-skip-tls-verify "$@"
   else
-    fail "Set either SPOKE_KUBECONFIG or both SPOKE_API + SPOKE_TOKEN"
+    oc "$@"
   fi
 }
+
+# Verify oc is available and the cluster is reachable. Fail with a clear message
+# here, rather than exiting silently later inside a command with hidden output.
+command -v oc >/dev/null 2>&1 || fail "'oc' CLI not found in PATH"
+
+SPOKE_USER=$(spoke whoami 2>&1) \
+  || fail "Cannot access the cluster via oc: ${SPOKE_USER}. Run 'oc login', or set SPOKE_KUBECONFIG, or SPOKE_API + SPOKE_TOKEN"
+SPOKE_SERVER=$(spoke whoami --show-server 2>/dev/null || true)
+
+# When falling back to the current oc context, confirm it is the intended cluster.
+if [[ -z "$SPOKE_KUBECONFIG" && ( -z "$SPOKE_API" || -z "$SPOKE_TOKEN" ) && "$ASSUME_YES" != true ]]; then
+  echo "This script will modify the cluster you are currently logged in to:"
+  echo "  API server : ${SPOKE_SERVER}"
+  echo "  User       : ${SPOKE_USER}"
+  [[ -t 0 ]] || fail "Not an interactive terminal; re-run with --yes to confirm the cluster above"
+  read -r -p "Continue? [y/N] " REPLY
+  [[ "$REPLY" =~ ^[Yy]$ ]] || fail "Aborted by user"
+fi
 
 # ---------------------------------------------------------------------------
 # Step 1 — Fetch Quay CA cert (always re-fetch, never reuse a cached file)
