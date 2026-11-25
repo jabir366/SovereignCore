@@ -240,7 +240,18 @@ fi
 # ---------------------------------------------------------------------------
 # Name length: placement controller labels "<name>-decision-N" (max 63 chars)
 # ---------------------------------------------------------------------------
-CH=$(printf '%s' "$CLUSTER" | shasum | cut -c1-10)
+hash_cmd() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum
+  elif command -v sha1sum >/dev/null 2>&1; then
+    sha1sum
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum
+  else
+    md5sum
+  fi
+}
+CH=$(printf '%s' "$CLUSTER" | hash_cmd | cut -c1-10)
 PL="${SC_POLICY}-on-${CH}"
 ISO_PL="tsc-isolation-on-${CH}"
 [ $(( ${#PL} + 9 )) -le 63 ] || die "placement name '$PL' is too long (limit 63 with '-decision-N')"
