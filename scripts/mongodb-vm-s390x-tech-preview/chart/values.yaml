@@ -117,14 +117,14 @@ diskImage:
   caCert: ""
   ## Storage class for the VM boot PVC (must support RWO block on s390x).
   ##
-  ## COMPLIANCE — Phase 1 — mdb-enc-05 → iscf-dr-01 · iscf-dr-05 · iscf-dr-06
-  ##   For encrypted-at-rest compliance use the ODF encrypted storage class:
-  ##     storageClassName: "ocs-storagecluster-ceph-rbd-encrypted"
-  ##   For dev/test environments without encrypted ODF the default below is safe:
-  ##     storageClassName: "ocs-storagecluster-ceph-rbd-virtualization"
-  ##   Driven by broker param: storage_class_name (catalog/schema.json).
-  ##   Default is the non-encrypted class — override per instance via values.yaml.tmpl.
-  storageClassName: "ocs-storagecluster-ceph-rbd-virtualization"
+  ## If empty (""), automatically defaults to the tenant-isolated StorageClass:
+  ##   ceph-rbd-<tenantId>
+  ## (where tenantId == accountId, resolved from governance.namespaceLabel.tenantId,
+  ## namespaceOverride, or Release.Namespace).
+  ## Example explicit overrides:
+  ##   storageClassName: "ocs-storagecluster-ceph-rbd-encrypted"
+  ##   storageClassName: "ceph-rbd-platform"
+  storageClassName: ""
   ## Boot disk size
   diskSizeGi: 25
 

@@ -164,7 +164,9 @@ Accepts the root context (.) directly.
 {{- $pullSecret    := index .Values "diskImage.pullSecret"           | default .Values.diskImage.pullSecret }}
 {{- $certConfigMap := index .Values "diskImage.certConfigMap"        | default .Values.diskImage.certConfigMap }}
 {{- $sourcePVCNS   := index .Values "diskImage.sourcePVCNamespace"   | default .Values.diskImage.sourcePVCNamespace }}
-{{- $storageClass  := index .Values "diskImage.storageClassName"     | default .Values.diskImage.storageClassName }}
+{{- $tenantId      := include "mongodb-vm.val" (list . "governance.namespaceLabel.tenantId") | default (.Values.namespaceOverride | default .Release.Namespace) }}
+{{- $defaultSC     := printf "ceph-rbd-%s" $tenantId }}
+{{- $storageClass  := include "mongodb-vm.val" (list . "diskImage.storageClassName") | default $defaultSC }}
 {{- $diskSizeGi    := index .Values "diskImage.diskSizeGi"           | default .Values.diskImage.diskSizeGi }}
 {{- if $containerDisk }}
 source:
