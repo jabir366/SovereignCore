@@ -21,7 +21,7 @@
   Verified on sc-x86. Do not use :latest.
 */ -}}
 {{- if and (include "mongodb-vm.val" (list . "complianceChecks.enabled") | eq "true") (include "mongodb-vm.val" (list . "ssh.enabled") | eq "true") }}
-{{- $ns := .Values.namespaceOverride | default .Release.Namespace }}
+{{- $ns := .Release.Namespace }}
 {{- $base := include "mongodb-vm.fullname" . }}
 {{- $image := "registry.redhat.io/ansible-automation-platform/ee-minimal-rhel9:2.18.9-3" }}
 {{- $count := 1 }}

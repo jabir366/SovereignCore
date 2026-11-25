@@ -31,7 +31,7 @@ apiVersion: velero.io/v1
 kind: Schedule
 metadata:
   name: {{ include "mongodb-vm.fullname" . }}-backup
-  namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "mongodb-vm.labels" . | nindent 4 }}
     app.kubernetes.io/component: backup
@@ -46,7 +46,7 @@ spec:
     ## Snapshot the entire namespace so all VM resources (PVC, Secret, Service)
     ## are included and can be restored atomically.
     includedNamespaces:
-      - {{ .Values.namespaceOverride | default .Release.Namespace | quote }}
+      - {{ .Release.Namespace | quote }}
     includeClusterResources: false
     ## Retain backups for the configured TTL (default 720h = 30 days).
     ttl: {{ $retention | quote }}

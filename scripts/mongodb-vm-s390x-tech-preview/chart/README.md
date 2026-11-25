@@ -76,7 +76,6 @@ The chart is deployed by the Sovereign Core catalog broker (`byop-broker`); it i
 | `imagePullSecrets` | Pre-existing image pull secrets for container registry | `[]` |
 | `instance.name` | Instance name used in resource names (`<name>-mongodb-...`); falls back to release name | `""` |
 | `instance.id`, `instance.environment`, `instance.clusterName` | Broker-injected metadata labels / annotations | `""` |
-| `namespaceOverride` | Namespace written into manifests | `""` |
 | `nameOverride`, `fullnameOverride` | Override resource naming | `""` |
 | `database_name`, `database_user`, `database_password`, `admin_password`, `storage_class_name`, `storage_size_gi`, `instance_name` | Flat values passed by the broker. When set they take precedence via template overrides | unset |
 

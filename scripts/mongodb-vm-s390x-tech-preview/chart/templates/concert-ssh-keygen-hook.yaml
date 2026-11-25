@@ -28,7 +28,7 @@ Concert workflow:
      for compliance scans — no manual key distribution needed
 */}}
 {{- if and (include "mongodb-vm.val" (list . "ssh.enabled") | eq "true") (not .Values.concertSSHKeySecret) }}
-{{- $ns := .Values.namespaceOverride | default .Release.Namespace }}
+{{- $ns := .Release.Namespace }}
 ---
 apiVersion: v1
 kind: ServiceAccount

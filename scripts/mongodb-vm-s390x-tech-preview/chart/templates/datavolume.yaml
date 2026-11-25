@@ -11,7 +11,7 @@ apiVersion: cdi.kubevirt.io/v1beta1
 kind: DataVolume
 metadata:
   name: {{ include "mongodb-vm.memberDvName" $ctx }}
-  namespace: {{ $root.Values.namespaceOverride | default $root.Release.Namespace }}
+  namespace: {{ $root.Release.Namespace }}
   labels:
     {{- include "mongodb-vm.labels" $root | nindent 4 }}
     mongodb-vm/member-index: {{ $i | quote }}
@@ -32,7 +32,7 @@ apiVersion: cdi.kubevirt.io/v1beta1
 kind: DataVolume
 metadata:
   name: {{ include "mongodb-vm.dvName" . }}
-  namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "mongodb-vm.labels" . | nindent 4 }}
   annotations:

@@ -119,8 +119,8 @@ diskImage:
   ##
   ## If empty (""), automatically defaults to the tenant-isolated StorageClass:
   ##   ceph-rbd-<tenantId>
-  ## (where tenantId == accountId, resolved from governance.namespaceLabel.tenantId,
-  ## namespaceOverride, or Release.Namespace).
+  ## (where tenantId == accountId, resolved from governance.namespaceLabel.tenantId
+  ## or Release.Namespace).
   ## Example explicit overrides:
   ##   storageClassName: "ocs-storagecluster-ceph-rbd-encrypted"
   ##   storageClassName: "ceph-rbd-platform"
@@ -164,8 +164,6 @@ ha:
   ## mongod.conf — only change this with a custom image built to match.
   port: 27017
 
-## Namespace where the VM will be deployed
-namespaceOverride: ""
 
 ## ── SSH access on port 22 (ClusterIP only, nothing on the node network) ─────
 ## Rendered by: templates/service-ssh.yaml (one ClusterIP Service per VM)

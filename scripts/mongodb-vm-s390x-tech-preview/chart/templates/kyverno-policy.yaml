@@ -38,7 +38,7 @@ apiVersion: kyverno.io/v1
 kind: Policy
 metadata:
   name: {{ include "mongodb-vm.fullname" . }}-restrict-svc-type
-  namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "mongodb-vm.labels" . | nindent 4 }}
     app.kubernetes.io/component: compliance-policy
@@ -63,7 +63,7 @@ spec:
               kinds:
                 - Service
               namespaces:
-                - {{ .Values.namespaceOverride | default .Release.Namespace | quote }}
+                - {{ .Release.Namespace | quote }}
       ## Exempt the chart's own VIP service when lb_type=external/local so that
       ## operators who intentionally configure the VIP with MetalLB can do so by
       ## turning this policy off (network.blockExternalServices=false) rather than
@@ -71,7 +71,7 @@ spec:
       validate:
         message: >-
           Services of type LoadBalancer or NodePort are not permitted in namespace
-          {{ .Values.namespaceOverride | default .Release.Namespace }} without compliance
+          {{ .Release.Namespace }} without compliance
           sign-off. Set network.blockExternalServices=false in chart values to allow
           external Service types, or change the Service to type ClusterIP.
           Control: mdb-net-03 / iscf-dr-03 / iscf-dr-04.

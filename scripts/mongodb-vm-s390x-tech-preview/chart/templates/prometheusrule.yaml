@@ -23,7 +23,7 @@
 {{- $scrapeInterval    := include "mongodb-vm.val" (list . "monitoring.scrapeInterval") | default "30s" }}
 {{- $alertPending      := include "mongodb-vm.val" (list . "monitoring.alertPendingDuration") | default "2m" }}
 {{- $replicaCount      := include "mongodb-vm.val" (list . "ha.replicaCount") | default "3" }}
-{{- $ns                := .Values.namespaceOverride | default .Release.Namespace }}
+{{- $ns                := .Release.Namespace }}
 {{- if $monitoringEnabled }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule

@@ -38,7 +38,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: {{ include "mongodb-vm.fullname" . }}-restrict
-  namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "mongodb-vm.labels" . | nindent 4 }}
     ## COMPLIANCE Phase 1 — mdb-net-02 + mdb-net-04 (iscf-dr-02/03/04/09)
@@ -186,7 +186,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: {{ include "mongodb-vm.fullname" . }}-compliance-checks
-  namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "mongodb-vm.labels" . | nindent 4 }}
     app.kubernetes.io/component: compliance-checks

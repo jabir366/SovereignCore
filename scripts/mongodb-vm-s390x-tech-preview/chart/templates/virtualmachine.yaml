@@ -11,7 +11,7 @@
   Must be outside the range loop — randAlphaNum produces a different value each call.
 */ -}}
 {{- $base := include "mongodb-vm.fullname" . -}}
-{{- $ns   := .Values.namespaceOverride | default .Release.Namespace -}}
+{{- $ns   := .Release.Namespace -}}
 {{- $keyFileSecretName := printf "%s-keyfile" $base -}}
 {{- $existingSecret := lookup "v1" "Secret" $ns $keyFileSecretName -}}
 {{- $sharedKeyFile := "" -}}
@@ -47,7 +47,7 @@ apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
   name: {{ include "mongodb-vm.memberName" $ctx }}
-  namespace: {{ $root.Values.namespaceOverride | default $root.Release.Namespace }}
+  namespace: {{ $root.Release.Namespace }}
   labels:
     {{- include "mongodb-vm.labels" $root | nindent 4 }}
     mongodb-vm/member-index: {{ $i | quote }}
@@ -70,7 +70,7 @@ spec:
     spec:
       ## hostname + subdomain enable per-VM DNS via the headless service:
       ## <memberName>.<headlessSvcName>.<namespace>.svc.cluster.local
-      ## namespace is dynamic — driven by namespaceOverride or Release.Namespace
+      ## namespace is dynamic — driven by Release.Namespace
       hostname: {{ include "mongodb-vm.memberName" $ctx }}
       subdomain: {{ include "mongodb-vm.headlessSvcName" $root }}
       ## Must target s390x worker nodes
@@ -143,7 +143,7 @@ apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
   name: {{ include "mongodb-vm.fullname" . }}
-  namespace: {{ .Values.namespaceOverride | default .Release.Namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "mongodb-vm.labels" . | nindent 4 }}
   annotations:

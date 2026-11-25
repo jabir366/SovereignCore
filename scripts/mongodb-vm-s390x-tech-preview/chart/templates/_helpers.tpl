@@ -128,7 +128,7 @@ app.kubernetes.io/instance: {{ include "mongodb-vm.fullname" . }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- /* The deployment namespace IS the tenant ID, so default to it. Matches the namespace label set by the ns-label hook. */}}
-{{- $tenantId := include "mongodb-vm.val" (list . "governance.namespaceLabel.tenantId") | default (.Values.namespaceOverride | default .Release.Namespace) }}
+{{- $tenantId := include "mongodb-vm.val" (list . "governance.namespaceLabel.tenantId") | default .Release.Namespace }}
 {{- if $tenantId }}
 sovereign.cloud.ibm.com/account-id: {{ $tenantId | quote }}
 sovcore.byop.ibm.com/account-id: {{ $tenantId | quote }}
@@ -164,7 +164,7 @@ Accepts the root context (.) directly.
 {{- $pullSecret    := index .Values "diskImage.pullSecret"           | default .Values.diskImage.pullSecret }}
 {{- $certConfigMap := index .Values "diskImage.certConfigMap"        | default .Values.diskImage.certConfigMap }}
 {{- $sourcePVCNS   := index .Values "diskImage.sourcePVCNamespace"   | default .Values.diskImage.sourcePVCNamespace }}
-{{- $tenantId      := include "mongodb-vm.val" (list . "governance.namespaceLabel.tenantId") | default (.Values.namespaceOverride | default .Release.Namespace) }}
+{{- $tenantId      := include "mongodb-vm.val" (list . "governance.namespaceLabel.tenantId") | default .Release.Namespace }}
 {{- $defaultSC     := printf "ceph-rbd-%s" $tenantId }}
 {{- $storageClass  := include "mongodb-vm.val" (list . "diskImage.storageClassName") | default $defaultSC }}
 {{- $diskSizeGi    := index .Values "diskImage.diskSizeGi"           | default .Values.diskImage.diskSizeGi }}
@@ -210,7 +210,7 @@ Passwords are NEVER read from values.yaml.
 Returns a JSON dict: vmPass / rootPass / dbPass.
 */}}
 {{- define "mongodb-vm.resolvePasswords" -}}
-{{- $ns         := .Values.namespaceOverride | default .Release.Namespace -}}
+{{- $ns         := .Release.Namespace -}}
 {{- $secretName := printf "%s-mongodb-creds" (include "mongodb-vm.fullname" .) -}}
 {{- $existing   := lookup "v1" "Secret" $ns $secretName -}}
 {{- $vmPass     := "" -}}
@@ -263,7 +263,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: {{ printf "%s-mongodb-creds" (include "mongodb-vm.fullname" $r) }}
-  namespace: {{ $r.Values.namespaceOverride | default $r.Release.Namespace }}
+  namespace: {{ $r.Release.Namespace }}
   labels:
     {{- include "mongodb-vm.labels" $r | nindent 4 }}
   annotations:
@@ -362,7 +362,7 @@ userdata templates carry a direct-call fallback for safety).
        what VIP clients verify against — both must be in the cert SANs.
        The Vault PKI role's allowed_domains must permit these zones too
        (doc Part A3). */ -}}
-{{- $ns := include "mongodb-vm.val" (list . "namespaceOverride") | default .Release.Namespace -}}
+{{- $ns := .Release.Namespace -}}
 {{- $base := include "mongodb-vm.fullname" . -}}
 {{- $altNames := "localhost" -}}
 {{- if include "mongodb-vm.val" (list . "ha.enabled") | eq "true" -}}
@@ -394,7 +394,7 @@ Cloud-init userdata — standalone (no replica set).
 {{- /* Merge Concert cluster SSH key (from Secret) with any user-supplied keys */ -}}
 {{- $allSSHKeys := .Values.sshAuthorizedKeys | default list -}}
 {{- $concertSecretName := include "mongodb-vm.concertSecretName" . -}}
-{{- $ns := .Values.namespaceOverride | default .Release.Namespace -}}
+{{- $ns := .Release.Namespace -}}
 {{- $concertSecret := lookup "v1" "Secret" $ns $concertSecretName -}}
 {{- if $concertSecret -}}
   {{- $concertKey := index $concertSecret.data "authorized_key" | b64dec -}}
@@ -513,7 +513,7 @@ write_files:
       VAULT_ROLE_ID_FILE=/etc/mongo-vault/role_id
       VAULT_WRAPPED_SID_FILE=/etc/mongo-vault/wrapped-secret-id
       VAULT_RENEWAL_SID_FILE=/etc/mongo-vault/renewal-secret-id
-      MONGO_TLS_CN={{ include "mongodb-vm.fullname" . }}.{{ .Values.namespaceOverride | default .Release.Namespace }}.svc.cluster.local
+      MONGO_TLS_CN={{ include "mongodb-vm.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
       MONGO_TLS_ALT_NAMES={{ $vb.altNames }}
       MONGO_TLS_IP_SANS=127.0.0.1
       MONGO_TLS_TTL={{ $vb.certTTL }}
@@ -659,7 +659,7 @@ Member-0 additionally:
 {{- define "mongodb-vm.userdata.ha" -}}
 {{- $base    := include "mongodb-vm.fullname" . -}}
 {{- $svc     := include "mongodb-vm.headlessSvcName" . -}}
-{{- $ns      := .Values.namespaceOverride | default .Release.Namespace -}}
+{{- $ns      := .Release.Namespace -}}
 {{- $rsName  := include "mongodb-vm.val" (list . "ha.replicaSetName") -}}
 {{- $port    := include "mongodb-vm.val" (list . "ha.port") | default "27017" | int -}}
 {{- $count   := include "mongodb-vm.val" (list . "ha.replicaCount") | default "3" | int -}}
@@ -692,7 +692,7 @@ Member-0 additionally:
 {{- /* Merge Concert cluster SSH key (from Secret) with any user-supplied keys */ -}}
 {{- $allSSHKeys := .Values.sshAuthorizedKeys | default list -}}
 {{- $concertSecretName := include "mongodb-vm.concertSecretName" . -}}
-{{- $concertNs := .Values.namespaceOverride | default .Release.Namespace -}}
+{{- $concertNs := .Release.Namespace -}}
 {{- $concertSecret := lookup "v1" "Secret" $concertNs $concertSecretName -}}
 {{- if $concertSecret -}}
   {{- $concertKey := index $concertSecret.data "authorized_key" | b64dec -}}
