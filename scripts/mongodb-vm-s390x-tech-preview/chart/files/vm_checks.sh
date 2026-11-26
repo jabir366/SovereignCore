@@ -8,7 +8,8 @@
 #     virtctl ssh -n mongodb-vm -i /root/mdb_key cloud-user@vmi/mongodb-byop-s390x-0 \
 #        --command "bash -s" < vm_checks_standalone.sh
 #
-# Pass rule is the same as the workflow: pass unless output is empty or has "Result : FAIL".
+# Pass rule: a check passes only if its output has a "Result : PASS" line and no "Result : FAIL".
+# A check that errors without printing a verdict (e.g. a missing python module) counts as FAIL.
 
 RUN="bash"; [ "${SUDO:-0}" = "1" ] && RUN="sudo bash"
 PASS=0; FAIL=0; TOTAL=0
@@ -17,7 +18,7 @@ TMP=$(mktemp)
 run_check() {
   NAME="$1"; cat > "$TMP"; TOTAL=$((TOTAL+1))
   OUT=$($RUN "$TMP" 2>&1 </dev/null)
-  if [ -n "$OUT" ] && ! echo "$OUT" | grep -qiE 'Result[[:space:]]*:[[:space:]]*FAIL'; then
+  if echo "$OUT" | grep -qiE 'Result[[:space:]]*:[[:space:]]*PASS' && ! echo "$OUT" | grep -qiE 'Result[[:space:]]*:[[:space:]]*FAIL'; then
     PASS=$((PASS+1)); echo "PASS  $NAME"
   else
     FAIL=$((FAIL+1)); echo "FAIL  $NAME"

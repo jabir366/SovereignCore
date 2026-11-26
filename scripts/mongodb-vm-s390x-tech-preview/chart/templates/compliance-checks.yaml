@@ -134,6 +134,28 @@ spec:
             runAsNonRoot: true
             seccompProfile:
               type: RuntimeDefault
+          ## OpenShift runs the pod as a random UID that has no /etc/passwd entry, and ssh
+          ## refuses to start without one ("No user exists for uid ..."). The root
+          ## filesystem is read-only, so build a patched copy in an emptyDir and mount
+          ## it over /etc/passwd in the checks container.
+          initContainers:
+            - name: passwd
+              image: {{ $image | quote }}
+              imagePullPolicy: IfNotPresent
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  cp /etc/passwd /nss/passwd
+                  getent passwd "$(id -u)" >/dev/null || echo "checks:x:$(id -u):0:checks:/tmp:/bin/bash" >> /nss/passwd
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: nss
+                  mountPath: /nss
           containers:
             - name: checks
               image: {{ $image | quote }}
@@ -168,8 +190,14 @@ spec:
                   readOnly: true
                 - name: tmp
                   mountPath: /tmp
+                - name: nss
+                  mountPath: /etc/passwd
+                  subPath: passwd
+                  readOnly: true
           volumes:
             - name: tmp
+              emptyDir: {}
+            - name: nss
               emptyDir: {}
             - name: scripts
               configMap:
