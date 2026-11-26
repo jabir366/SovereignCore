@@ -11,7 +11,9 @@
 # Pass rule: a check passes only if its output has a "Result : PASS" line and no "Result : FAIL".
 # A check that errors without printing a verdict (e.g. a missing python module) counts as FAIL.
 
-RUN="bash"; [ "${SUDO:-0}" = "1" ] && RUN="sudo bash"
+# sudo resets PATH to /sbin:/bin:/usr/sbin:/usr/bin, which hides /usr/local/bin/python3 (3.12, the one
+# with pymongo installed) behind the system python3 (3.9, no pymongo). Keep /usr/local/bin first.
+RUN="bash"; [ "${SUDO:-0}" = "1" ] && RUN="sudo env PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin bash"
 PASS=0; FAIL=0; TOTAL=0
 TMP=$(mktemp)
 
