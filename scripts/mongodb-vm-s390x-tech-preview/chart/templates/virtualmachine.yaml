@@ -126,6 +126,9 @@ spec:
       ## Concert compliance public key — not a user input and no Helm `lookup` (disabled
       ## under ArgoCD). The concert-ssh-keygen pre-install hook publishes the public key
       ## alone in "<concertSSHKeySecret>-pub"; KubeVirt hands it to cloud-init at boot.
+      ## Only emitted when ssh.enabled: otherwise the -pub Secret is never created and the
+      ## virt-launcher pod hangs in Init on the missing Secret mount.
+{{- if include "mongodb-vm.val" (list $root "ssh.enabled") | eq "true" }}
       accessCredentials:
         - sshPublicKey:
             source:
@@ -133,6 +136,7 @@ spec:
                 secretName: {{ include "mongodb-vm.concertSecretName" $root }}-pub
             propagationMethod:
               noCloud: {}
+{{- end }}
 {{- end }}
 {{- else }}
 {{- /*
@@ -187,6 +191,7 @@ spec:
             secretRef:
               name: {{ $base }}-cloudinit
       ## Concert compliance public key — see the HA template above.
+{{- if include "mongodb-vm.val" (list . "ssh.enabled") | eq "true" }}
       accessCredentials:
         - sshPublicKey:
             source:
@@ -194,4 +199,5 @@ spec:
                 secretName: {{ include "mongodb-vm.concertSecretName" . }}-pub
             propagationMethod:
               noCloud: {}
+{{- end }}
 {{- end }}

@@ -2,7 +2,7 @@ apiVersion: v2
 name: mongodb-vm
 description: MongoDB Enterprise Advanced 8.0 on RHEL 9 s390x deployed as an OCP Virt VirtualMachine. Boot disk produced by securedimage/ (bootc + bootc-image-builder).
 type: application
-version: 1.1.43
+version: 1.1.44
 appVersion: "8.0"
 maintainers:
   - name: IBM SovereignCore
