@@ -6,8 +6,10 @@
 #   1. Fetches the Quay CA cert from the hub registry
 #   2. Merges Quay credentials into the spoke cluster-wide pull secret
 #      (openshift-config/pull-secret) so nodes can pull OCM/klusterlet images
-#   3. Creates a cluster-wide IDMS (ImageDigestMirrorSet) to redirect all
-#      registry pulls through the internal Quay mirror
+#   3. Creates a cluster-wide IDMS (ImageDigestMirrorSet) that redirects the
+#      ACM/MCE addon images (registry.redhat.io/multicluster-engine and
+#      registry.redhat.io/rhacm2) to the hub Quay mirror, so the klusterlet addons
+#      can pull without a registry.redhat.io login on the spoke
 #   4. Configures cluster-wide CA trust and OpenShift Virtualization (CDI) settings.
 #      Note: Per-namespace CDI secrets (quay-pull-secret) and CA ConfigMaps (quay-ca-bundle)
 #      are now automatically extracted and provisioned on-demand by the Helm chart's
@@ -213,6 +215,42 @@ for n in stale:
   fi
 else
   log "  ImageDigestMirrorSet API not available — skipping IDMS cleanup"
+fi
+
+# ---------------------------------------------------------------------------
+# Step 2c — Mirror the ACM/MCE addon images to the hub Quay
+#
+# The klusterlet addons (work-manager, managed-serviceaccount, cluster-proxy,
+# config-policy-controller, governance-policy-framework) are pulled from
+# registry.redhat.io. The acm-service-broker replaces the spoke pull secret with
+# the hub Quay entry only, so there is no registry.redhat.io login on the nodes
+# and those pulls fail with "unauthorized". The images are mirrored to the hub
+# Quay by mirror-mce-odf.sh (MCE -> <quay>/multicluster-engine/...) and by
+# 'oc image mirror' (ACM -> <quay>/sovcloud/rhacm2/...).
+#
+# The set is deliberately NOT named sovcloud-idms-*, which is the acm-service-broker's
+# own prefix.
+# ---------------------------------------------------------------------------
+log "Step 2c: Creating ImageDigestMirrorSet for ACM/MCE addon images"
+
+if spoke get crd imagedigestmirrorsets.config.openshift.io &>/dev/null; then
+  spoke apply -f - <<IDMSEOF
+apiVersion: config.openshift.io/v1
+kind: ImageDigestMirrorSet
+metadata:
+  name: byop-acm-mce-digest-mirrors
+spec:
+  imageDigestMirrors:
+  - source: registry.redhat.io/multicluster-engine
+    mirrors:
+    - ${QUAY_REGISTRY}/multicluster-engine
+  - source: registry.redhat.io/rhacm2
+    mirrors:
+    - ${QUAY_REGISTRY}/sovcloud/rhacm2
+IDMSEOF
+  ok "ImageDigestMirrorSet byop-acm-mce-digest-mirrors applied (multicluster-engine, rhacm2 -> ${QUAY_REGISTRY})"
+else
+  warn "ImageDigestMirrorSet API not available — skipping addon image mirror"
 fi
 
 # ---------------------------------------------------------------------------
